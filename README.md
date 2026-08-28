@@ -1,4 +1,4 @@
-# Catrounaut
+# Catronaut
 
 A self-hosted AI service built for extensible, domain-based agents. Designed domain-driven from day one, so new agent domains can be added without touching core logic.
 
