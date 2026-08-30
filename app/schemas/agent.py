@@ -13,6 +13,7 @@ class AgentInput(BaseModel):
 
 
 class AgentOutput(BaseModel):
+    run_id: str = Field(description="Correlate this response with server-side logs.")
     result: str
     model: str
     raw: dict | None = Field(

@@ -148,13 +148,19 @@ truth; consuming it for tools/loop belongs to those milestones.
 
 **Depends on:** M0.2. ✅
 
-### M1.2 — Error handling and resilience — PARTIALLY DONE
+### [x] M1.2 — Error handling and resilience — DONE (retry decided against, 2026-08-30)
 - [x] Exception hierarchy (`CatronautError` → `ProviderError` / `UnknownDomainError` /
       `DomainError`) and a FastAPI handler mapping to 4xx/5xx.
 - [x] Provider-level timeout, with transport/status/timeout failures mapped to `ProviderError`.
 - [x] `extract_content` raises instead of silently returning `""` on a malformed response.
-- [ ] **Still open: one bounded retry on transport errors.** Add `ToolError` when Phase 2 lands.
-**Depends on:** M0.2.
+- [x] **Decided: no bounded retry here.** The Go gateway in front of this service already retries.
+  Adding a second retry layer inside this service would stack on top of it — and a single call
+  already takes 44s–600s on the dev CPU box, so stacked retries risk multi-minute worst-case
+  latency for no real gain: a timeout or connection failure here usually means Ollama is
+  overloaded or down, and an immediate retry doesn't fix that, only a backoff at the layer with
+  visibility across all backends does (the gateway). Add `ToolError` when Phase 2 lands, still no
+  retry.
+**Depends on:** M0.2. ✅
 
 ### [x] M1.3 — Declarative domain registry — DONE
 `app/domains/registry.py` holds `AGENT_REGISTRY`; `Orchestrator` is constructed with it from
@@ -162,18 +168,56 @@ truth; consuming it for tools/loop belongs to those milestones.
 `app/domains/`, one line in the registry, one router — `app/core/` untouched. Checklist documented
 in README ("Adding a domain").
 
-### M1.4 — Run context object
-A `RunContext` threaded through the agent: `run_id`, `domain`, `session_id`, token budget, the
-step trace, and accumulated tool results. Every later phase writes into it — the loop records
-steps, RAG records retrieved chunks, fine-tuning data collection reads it.
-**Depends on:** M1.1.
+### [x] M1.4 — Run context object — DONE (2026-08-30)
 
-### M1.5 — Observability
-Structured logging keyed by `run_id`: prompt token count, response token count, latency, tool calls
-attempted vs succeeded, truncation events. Optionally persist runs to JSONL under `data/`.
-**Depends on:** M1.4.
-**[4B gap]** Tool-call success rate per model is the number that tells you whether a design works on
-the 4B or only on the 27B. Without this metric, Phase 2 and 4 tuning is guesswork.
+Shipped [app/core/run_context.py](../app/core/run_context.py): a `RunContext` dataclass with
+`run_id` (auto-generated, 12 hex chars), `domain`, `model_profile` (a snapshot from
+`settings.model_profile` at run start), `session_id` (always `None` today — no session store
+until M3.4), `created_at`, and three fields reserved for later milestones to write into without
+another round of call-site changes: `token_budget` (M3.1), `steps` (M4.2 loop trace),
+`tool_results` (M2.3).
+
+Wired in, not left dead:
+- `Agent._new_run_context()` and `Agent._build_output(run, raw, content)` on the base class
+  ([app/core/agent_base.py](../app/core/agent_base.py)) — every agent creates one run per
+  `handle()` call the same way.
+- `UIUXAgent.handle` creates the run first thing, logs `run_id=... domain=... start` / `...done`,
+  and includes `run.model_profile` in the vision-mismatch log line instead of re-reading settings.
+- **`AgentOutput.run_id` is now part of the API response.** This is the concrete payoff: the
+  caller (the Go gateway) gets a ID it can correlate against this service's logs when something
+  goes wrong, without needing structured log shipping yet (that's still M1.5).
+
+Deliberately NOT done here: no structured/JSON logging (M1.5), no session persistence (M3.4,
+`session_id` stays `None`), nothing yet writes to `token_budget` / `steps` / `tool_results` —
+those stay empty until the milestones that own them land.
+
+**Depends on:** M1.1. ✅
+
+### [x] M1.5 — Observability — DONE (2026-08-30), scoped to what has a consumer today
+
+Shipped: `ModelProvider.extract_usage(raw) -> RunUsage` (`prompt_tokens`, `response_tokens`,
+`duration_s`), implemented in `OllamaProvider` from Ollama's own `prompt_eval_count` /
+`eval_count` / `total_duration`. Same reasoning as `extract_content`: these are Ollama-specific
+field names, so the extraction lives in the provider, not in `agent_base.py` or `RunContext`
+directly. `Agent._build_output` calls it, stores the result on `run.usage`, and logs one
+structured "done" line per request: `run_id=... domain=... done prompt_tokens=... 
+response_tokens=... duration_s=...`. Verified live against `qwen3:4b`.
+
+**Deliberately deferred, not forgotten:**
+- **Tool calls attempted/succeeded, truncation events** — can't be logged before Phase 2 (tools)
+  and Phase 3 (context budgeting) exist to produce them. `RunContext.tool_results` /
+  `token_budget` are already in place from M1.4 for those milestones to fill in; M1.5 doesn't
+  need to touch them again.
+- **JSONL persistence to `data/`** (the ROADMAP text called this optional) — skipped for now on
+  purpose: there is no consumer for it yet. The first real consumer is M6.2 (fine-tuning data
+  collection), which needs richer records anyway (full input/output, accept/edit/reject labels),
+  not just token counts. Building a persistence layer now would mean guessing that shape twice.
+  Revisit at M6.2 instead of building it speculatively here.
+- **True structured (JSON) logging** — still plain-text `logging` with `key=value` tokens in the
+  message, not a JSON formatter. Sufficient for grepping by `run_id` today; revisit only if log
+  aggregation tooling is introduced.
+
+**Depends on:** M1.4. ✅
 
 ---
 
@@ -386,10 +430,8 @@ adapter swapping (latency cost) — measure before choosing.
 
 ```
 [x] M0.1 → M0.2 → M0.3 → M0.4 → M0.5   (service boots — DONE)
-[x] M1.1                                (model profiles — DONE)
-[x] M1.3                                (declarative registry — DONE, landed early)
-[~] M1.2                                (errors done; bounded retry still open)
-    M1.4 → M1.5                         (harness: run context, observability)
+[x] M1.1 → M1.2 → M1.3 → M1.4 → M1.5    (Phase 1: harness — DONE. M1.2 retry skipped by decision;
+                                          M1.5's JSONL persistence deferred to M6.2 by decision)
     M2.1 → M2.2 → M2.3                  (tool format frozen — hard gate for the loop)
     M3.1 → M3.2 → M3.3 → M3.4           (context budget)
     M4.1 → M4.2 → M4.3                  (loop; M4.4 optional, prod only)
@@ -398,9 +440,12 @@ adapter swapping (latency cost) — measure before choosing.
     M2.4 lands after M5.4.
 ```
 
-**Next up: M1.4 (RunContext).** M1.1 landed; M1.4 needs it (a run's token budget and tool trace
-are meaningless without knowing which model profile is active). M1.2's retry is the other easy
-pickup if a smaller task is wanted first.
+**Phase 1 (Harness) is now fully done.** Next up: **Phase 2, starting with M2.1 (tool
+definitions)**. That's the first milestone with a hard downstream gate — M2.2 (tool-call parsing
+style) must be frozen before M4.2 (the loop) can be finalized, so get the tool schema shape right
+before building much on top of it. Verify every tool schema decision against `qwen3:4b`
+(prompt-style tool calling, per its `ModelProfile`) — the 27B's native tool calling is the easy
+case.
 
 **Decisions settled (2026-08-29) — do not re-ask:**
 - **Prod model tag: `qwen3.8-27b`.** Verified the same day: it 404s from the public Ollama library,

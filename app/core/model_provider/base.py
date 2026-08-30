@@ -6,7 +6,15 @@ touching domain code.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class RunUsage:
+    prompt_tokens: int
+    response_tokens: int
+    duration_s: float
 
 
 class ModelProvider(ABC):
@@ -34,6 +42,12 @@ class ModelProvider(ABC):
 
         Overridden per backend so agents never reach into provider-shaped dicts.
         """
+        raise NotImplementedError
+
+    def extract_usage(self, raw: dict[str, Any]) -> RunUsage:
+        """Pull token/latency metrics out of a raw response. See extract_content — same reason:
+        metric field names (e.g. Ollama's `prompt_eval_count` vs. an OpenAI-style `usage.
+        prompt_tokens`) are backend-specific and must not leak into agents or RunContext."""
         raise NotImplementedError
 
     async def embed(self, texts: list[str]) -> list[list[float]]:

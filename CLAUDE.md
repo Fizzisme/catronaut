@@ -5,12 +5,16 @@
 ## STATUS (update this block whenever work lands)
 
 - **Last synced with code:** 2026-08-30
-- **Branch:** `feat/model-profile` (off `develop`, not yet merged)
-- **Done:** ROADMAP Phase 0 (M0.1–M0.5) + M1.1 + M1.3. M1.2 partial (errors done, retry open).
-  Phase 0 + M1.3 are merged to `develop` via PR #4; M1.1 is on this branch, not yet merged.
-  The service boots and answers with a real `qwen3:4b`. 12 tests pass.
-- **Next up:** ROADMAP M1.4 — `RunContext` (needs M1.1, which is now done). M1.2's bounded retry
-  is the smaller pickup if that's preferred first.
+- **Branch:** `feat/model-profile` (off `develop`, PR #5 open against `develop`, not yet merged)
+- **Done: ROADMAP Phase 0 AND Phase 1 in full** (M0.1–M0.5, M1.1–M1.5). M1.2 = no retry, by
+  decision; M1.5's JSONL persistence deferred to M6.2, by decision — both documented in §6, not
+  loose ends. Phase 0 + M1.3 are merged to `develop` via PR #4; M1.1/M1.2/M1.4/M1.5 are on this
+  branch (PR #5), not yet merged. The service boots and answers with a real `qwen3:4b`, with
+  per-run token/latency metrics in the logs. 17 tests pass.
+- **Next up:** ROADMAP Phase 2, starting with M2.1 (tool definitions). First hard gate: M2.2's
+  tool-call parsing style must be frozen before M4.2 (the loop) can be finalized — verify every
+  tool schema decision against `qwen3:4b` (prompt-style tool calling per its `ModelProfile`)
+  before assuming the 27B's native tool calling.
 - **Do not redo Phase 0.** The missing `config.py`, missing `model_provider/`, UTF-16
   `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**.
 - **Git flow note:** PR #2 merged straight to `main` and had to be reverted (PR #3) — `main` only
@@ -129,26 +133,32 @@ app/
 ├── core/
 │   ├── config.py               pydantic-settings `Settings` + `settings` singleton
 │   ├── model_profile.py        ModelProfile (context/vision/tools/tier) + get_model_profile()
+│   ├── run_context.py          RunContext(run_id, domain, model_profile, session_id, ...)
 │   ├── exceptions.py           CatronautError tree + register_exception_handlers()
 │   ├── lifespan.py             startup: OllamaProvider + Orchestrator; shutdown: aclose()
-│   ├── agent_base.py           abstract `Agent`, plus `_build_output()`
+│   ├── agent_base.py           abstract `Agent`; `_new_run_context()`; `_build_output()` also
+│   │                           extracts usage + logs the structured "done" line (M1.5)
 │   ├── orchestrator.py         domain -> agent instance; raises UnknownDomainError
 │   └── model_provider/
-│       ├── base.py             ModelProvider ABC: chat(), aclose(), extract_content(), embed()
-│       └── ollama_provider.py  httpx.AsyncClient; error mapping; </think> stripping; health()
+│       ├── base.py             ModelProvider ABC: chat(), aclose(), extract_content(),
+│       │                       extract_usage() -> RunUsage, embed()
+│       └── ollama_provider.py  httpx.AsyncClient; error mapping; </think> stripping;
+│                               extract_usage() from prompt_eval_count/eval_count/total_duration;
+│                               health()
 ├── domains/
 │   ├── registry.py             AGENT_REGISTRY — the one place a domain is declared
 │   └── ui_ux/
-│       ├── agent.py            builds [system, user(+images)], one chat() call
+│       ├── agent.py            creates a RunContext, builds [system, user(+images)], chat()
 │       └── prompts.py          SYSTEM_PROMPT constant
 └── schemas/
-    └── agent.py                AgentInput{prompt, image_base64?}, AgentOutput{result, model, raw?}
+    └── agent.py                AgentInput{prompt, image_base64?},
+                                 AgentOutput{run_id, result, model, raw?}
 ```
 
 Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `models/base`, `models/adapters/{ui_ux,code_review}`, `data/{raw,processed,vectorstore}`,
 `evaluation/{datasets/{ui_ux,code_review},results,scripts}`, `configs/`,
-`scripts/smoke_test.py`, `tests/test_api.py` (12 tests), `docs/FLOW.md` (see §5 for its
+`scripts/smoke_test.py`, `tests/test_api.py` (17 tests), `docs/FLOW.md` (see §5 for its
 English-only exception).
 
 ## 5. Conventions — follow these
@@ -167,6 +177,15 @@ English-only exception).
 - **Model-specific behaviour goes through `settings.model_profile`, never `if model_name == ...`.**
   Add a new model by adding an entry to `_PROFILES` in `app/core/model_profile.py`; an unregistered
   tag falls back to a conservative profile with a logged warning rather than guessing.
+- **Every agent creates a `RunContext` first thing in `handle()`** via `self._new_run_context()`,
+  and threads it into `self._build_output(run, raw, content)`. Log lines inside `handle()` should
+  include `run_id=%s` so a request is traceable end to end; `AgentOutput.run_id` gives the caller
+  the same ID for cross-referencing.
+- **Token/latency metrics go through `ModelProvider.extract_usage(raw) -> RunUsage`, never read
+  off `raw` directly in `agent_base.py` or a domain agent.** Same reasoning as `extract_content`:
+  the field names (`prompt_eval_count`, `eval_count`, `total_duration` for Ollama) are
+  backend-specific. `_build_output` already calls it and sets `run.usage` — don't duplicate that
+  in a domain agent.
 - **Errors**: raise a `CatronautError` subclass; the handler maps it to
   `{"error": {"code", "message"}}`. Never let a bare exception reach the client.
   `ProviderError` → 502, `UnknownDomainError` → 404, `DomainError` → 422.
@@ -188,10 +207,16 @@ English-only exception).
 - Postgres: **coming later**, on the GPU server; a Neon URL is the likely first form.
   Stays commented in `.env.example` until ROADMAP M3.4.
 - Vision: **stays optional**. Revisit only after the real 27B runs on prod.
+- Retry: **not implemented here, on purpose** — the Go gateway owns it (see limitation #1 below).
+- Run-log JSONL persistence: **deferred to ROADMAP M6.2**, not built speculatively now — see the
+  M1.5 section in `ROADMAP.md` for why.
 
 **Known limitations of the current implementation:**
 
-1. **No retry.** A transport failure surfaces immediately as 502. Bounded retry is ROADMAP M1.2.
+1. **No retry, by decision (2026-08-30).** A transport failure surfaces immediately as 502.
+   The Go gateway already retries; adding a second retry layer here would stack with it and risk
+   multi-minute worst-case latency on top of the 44s–600s a single call already takes. Do not
+   re-add this without a reason that outweighs that.
 2. **No tools, no loop, no RAG, no context budgeting, no session/history.** `UIUXAgent` is
    single-shot and stateless. This is the whole remaining ROADMAP.
 3. **`ModelProvider.embed` raises `NotImplementedError`** by design (ROADMAP M5.3), and the dev
