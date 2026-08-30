@@ -53,6 +53,17 @@ def test_analyze(client):
     assert response.json()["result"] == "Looks fine."
 
 
+def test_analyze_returns_a_run_id(client):
+    body = client.post("/ui-ux/analyze", json={"prompt": "Review my login form"}).json()
+    assert body["run_id"]
+
+
+def test_analyze_run_id_is_unique_per_request(client):
+    first = client.post("/ui-ux/analyze", json={"prompt": "Review my login form"}).json()
+    second = client.post("/ui-ux/analyze", json={"prompt": "Review my login form"}).json()
+    assert first["run_id"] != second["run_id"]
+
+
 def test_analyze_with_image_on_text_only_model_still_succeeds(client):
     # qwen3:4b has no vision support (see ModelProfile), but the request must not be blocked —
     # this is a diagnostic log, not a hard gate (decided: vision stays optional/unblocking).

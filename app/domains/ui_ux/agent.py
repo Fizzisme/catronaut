@@ -12,17 +12,21 @@ class UIUXAgent(Agent):
     domain = "ui_ux"
 
     async def handle(self, input: AgentInput) -> AgentOutput:
+        run = self._new_run_context()
+        logger.info("run_id=%s domain=%s start", run.run_id, run.domain)
+
         messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
         user_message: dict = {"role": "user", "content": input.prompt}
         if input.image_base64:
-            if not settings.model_profile.supports_vision:
+            if not run.model_profile.supports_vision:
                 # Non-blocking by design (CLAUDE.md decision): the field stays accepted so
                 # requests don't need to change per model; Ollama just ignores `images` on a
                 # text-only model. This is only a diagnostic breadcrumb.
                 logger.info(
-                    "image_base64 provided but model=%s has no vision support; Ollama will "
-                    "ignore it",
+                    "run_id=%s image_base64 provided but model=%s has no vision support; "
+                    "Ollama will ignore it",
+                    run.run_id,
                     settings.model_name,
                 )
             # Ollama's multimodal message format.
@@ -32,4 +36,5 @@ class UIUXAgent(Agent):
         raw = await self.model_provider.chat(messages=messages)
         content = self.model_provider.extract_content(raw)
 
-        return self._build_output(raw, content)
+        logger.info("run_id=%s domain=%s done", run.run_id, run.domain)
+        return self._build_output(run, raw, content)

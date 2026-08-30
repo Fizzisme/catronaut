@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 
 from app.core.config import settings
 from app.core.model_provider.base import ModelProvider
+from app.core.run_context import RunContext
 from app.schemas.agent import AgentInput, AgentOutput
 
 
@@ -21,8 +22,16 @@ class Agent(ABC):
     async def handle(self, input: AgentInput) -> AgentOutput:
         ...
 
-    def _build_output(self, raw: dict, content: str) -> AgentOutput:
+    def _new_run_context(self, session_id: str | None = None) -> RunContext:
+        return RunContext(
+            domain=self.domain,
+            model_profile=settings.model_profile,
+            session_id=session_id,
+        )
+
+    def _build_output(self, run: RunContext, raw: dict, content: str) -> AgentOutput:
         return AgentOutput(
+            run_id=run.run_id,
             result=content,
             model=raw.get("model", ""),
             raw=raw if settings.expose_raw_response else None,
