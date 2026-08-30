@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.model_profile import ModelProfile, get_model_profile
+
 
 class Settings(BaseSettings):
     # `protected_namespaces=()` is required: pydantic v2 reserves the `model_`
@@ -42,6 +44,11 @@ class Settings(BaseSettings):
     @property
     def is_dev(self) -> bool:
         return self.app_env == "dev"
+
+    @property
+    def model_profile(self) -> ModelProfile:
+        """Capabilities of the currently configured model. See app/core/model_profile.py."""
+        return get_model_profile(self.model_name)
 
     @property
     def expose_raw_response(self) -> bool:

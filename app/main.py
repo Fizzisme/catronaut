@@ -29,10 +29,13 @@ app.include_router(api_router)
 async def health_check(request: Request) -> dict:
     provider = request.app.state.model_provider
     backend_ok = await provider.health()
+    profile = settings.model_profile
     return {
         "status": "ok" if backend_ok else "degraded",
         "env": settings.app_env,
         "model": settings.model_name,
         "model_backend": "up" if backend_ok else "down",
+        "model_tier": profile.reliability_tier,
+        "supports_vision": profile.supports_vision,
         "domains": request.app.state.orchestrator.domains,
     }
