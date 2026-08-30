@@ -36,5 +36,5 @@ class UIUXAgent(Agent):
         raw = await self.model_provider.chat(messages=messages)
         content = self.model_provider.extract_content(raw)
 
-        logger.info("run_id=%s domain=%s done", run.run_id, run.domain)
+        # _build_output logs the "done" line with token/latency metrics.
         return self._build_output(run, raw, content)

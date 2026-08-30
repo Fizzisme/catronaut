@@ -193,12 +193,31 @@ those stay empty until the milestones that own them land.
 
 **Depends on:** M1.1. ✅
 
-### M1.5 — Observability
-Structured logging keyed by `run_id`: prompt token count, response token count, latency, tool calls
-attempted vs succeeded, truncation events. Optionally persist runs to JSONL under `data/`.
-**Depends on:** M1.4.
-**[4B gap]** Tool-call success rate per model is the number that tells you whether a design works on
-the 4B or only on the 27B. Without this metric, Phase 2 and 4 tuning is guesswork.
+### [x] M1.5 — Observability — DONE (2026-08-30), scoped to what has a consumer today
+
+Shipped: `ModelProvider.extract_usage(raw) -> RunUsage` (`prompt_tokens`, `response_tokens`,
+`duration_s`), implemented in `OllamaProvider` from Ollama's own `prompt_eval_count` /
+`eval_count` / `total_duration`. Same reasoning as `extract_content`: these are Ollama-specific
+field names, so the extraction lives in the provider, not in `agent_base.py` or `RunContext`
+directly. `Agent._build_output` calls it, stores the result on `run.usage`, and logs one
+structured "done" line per request: `run_id=... domain=... done prompt_tokens=... 
+response_tokens=... duration_s=...`. Verified live against `qwen3:4b`.
+
+**Deliberately deferred, not forgotten:**
+- **Tool calls attempted/succeeded, truncation events** — can't be logged before Phase 2 (tools)
+  and Phase 3 (context budgeting) exist to produce them. `RunContext.tool_results` /
+  `token_budget` are already in place from M1.4 for those milestones to fill in; M1.5 doesn't
+  need to touch them again.
+- **JSONL persistence to `data/`** (the ROADMAP text called this optional) — skipped for now on
+  purpose: there is no consumer for it yet. The first real consumer is M6.2 (fine-tuning data
+  collection), which needs richer records anyway (full input/output, accept/edit/reject labels),
+  not just token counts. Building a persistence layer now would mean guessing that shape twice.
+  Revisit at M6.2 instead of building it speculatively here.
+- **True structured (JSON) logging** — still plain-text `logging` with `key=value` tokens in the
+  message, not a JSON formatter. Sufficient for grepping by `run_id` today; revisit only if log
+  aggregation tooling is introduced.
+
+**Depends on:** M1.4. ✅
 
 ---
 
@@ -411,8 +430,8 @@ adapter swapping (latency cost) — measure before choosing.
 
 ```
 [x] M0.1 → M0.2 → M0.3 → M0.4 → M0.5   (service boots — DONE)
-[x] M1.1 → M1.2 → M1.3 → M1.4           (harness — DONE; M1.2 retry deliberately skipped)
-    M1.5                                (observability — structured logging around run_id)
+[x] M1.1 → M1.2 → M1.3 → M1.4 → M1.5    (Phase 1: harness — DONE. M1.2 retry skipped by decision;
+                                          M1.5's JSONL persistence deferred to M6.2 by decision)
     M2.1 → M2.2 → M2.3                  (tool format frozen — hard gate for the loop)
     M3.1 → M3.2 → M3.3 → M3.4           (context budget)
     M4.1 → M4.2 → M4.3                  (loop; M4.4 optional, prod only)
@@ -421,10 +440,12 @@ adapter swapping (latency cost) — measure before choosing.
     M2.4 lands after M5.4.
 ```
 
-**Next up: M1.5 (Observability)**, or skip straight to **M2.1 (tool definitions)** if
-observability doesn't feel worth doing before there's anything but one log line to structure —
-`run_id` already exists in every log line and in the API response, so M1.5's main remaining job
-is JSON-structured logs / per-run metrics, not creating a run_id to key logs on (M1.4 did that).
+**Phase 1 (Harness) is now fully done.** Next up: **Phase 2, starting with M2.1 (tool
+definitions)**. That's the first milestone with a hard downstream gate — M2.2 (tool-call parsing
+style) must be frozen before M4.2 (the loop) can be finalized, so get the tool schema shape right
+before building much on top of it. Verify every tool schema decision against `qwen3:4b`
+(prompt-style tool calling, per its `ModelProfile`) — the 27B's native tool calling is the easy
+case.
 
 **Decisions settled (2026-08-29) — do not re-ask:**
 - **Prod model tag: `qwen3.8-27b`.** Verified the same day: it 404s from the public Ollama library,

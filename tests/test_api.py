@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.core.exceptions import ProviderError
 from app.core.model_profile import get_model_profile
-from app.core.model_provider.base import ModelProvider
+from app.core.model_provider.base import ModelProvider, RunUsage
 from app.core.model_provider.ollama_provider import OllamaProvider
 from app.main import app
 
@@ -20,6 +20,9 @@ class FakeProvider(ModelProvider):
 
     def extract_content(self, raw):
         return raw["message"]["content"]
+
+    def extract_usage(self, raw):
+        return RunUsage(prompt_tokens=10, response_tokens=5, duration_s=0.01)
 
     async def health(self) -> bool:
         return True
@@ -62,6 +65,13 @@ def test_analyze_run_id_is_unique_per_request(client):
     first = client.post("/ui-ux/analyze", json={"prompt": "Review my login form"}).json()
     second = client.post("/ui-ux/analyze", json={"prompt": "Review my login form"}).json()
     assert first["run_id"] != second["run_id"]
+
+
+def test_analyze_logs_usage_metrics(client, caplog):
+    with caplog.at_level("INFO"):
+        client.post("/ui-ux/analyze", json={"prompt": "Review my login form"})
+    done_lines = [r.message for r in caplog.records if "done" in r.message]
+    assert any("prompt_tokens=10 response_tokens=5" in msg for msg in done_lines)
 
 
 def test_analyze_with_image_on_text_only_model_still_succeeds(client):
@@ -111,6 +121,23 @@ def test_extract_content_rejects_empty(provider):
 def test_extract_content_rejects_bad_shape(provider):
     with pytest.raises(ProviderError):
         provider.extract_content({"error": "boom"})
+
+
+# --- usage metrics (ROADMAP M1.5) -------------------------------------------
+
+def test_extract_usage_reads_ollama_fields(provider):
+    raw = {"prompt_eval_count": 12, "eval_count": 158, "total_duration": 187_769_679_300}
+    usage = provider.extract_usage(raw)
+    assert usage.prompt_tokens == 12
+    assert usage.response_tokens == 158
+    assert usage.duration_s == pytest.approx(187.77, abs=0.01)
+
+
+def test_extract_usage_defaults_missing_fields_to_zero(provider):
+    usage = provider.extract_usage({})
+    assert usage.prompt_tokens == 0
+    assert usage.response_tokens == 0
+    assert usage.duration_s == 0
 
 
 # --- model profiles ----------------------------------------------------------

@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 
 from app.core.exceptions import ProviderError
-from app.core.model_provider.base import ModelProvider
+from app.core.model_provider.base import ModelProvider, RunUsage
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,15 @@ class OllamaProvider(ModelProvider):
         if not cleaned:
             raise ProviderError("Model returned reasoning only, with no answer")
         return cleaned
+
+    def extract_usage(self, raw: dict[str, Any]) -> RunUsage:
+        # total_duration is nanoseconds covering the whole request (load + prompt eval + eval) —
+        # matches wall-clock latency observed in practice (see CLAUDE.md §3 measurements).
+        return RunUsage(
+            prompt_tokens=raw.get("prompt_eval_count", 0),
+            response_tokens=raw.get("eval_count", 0),
+            duration_s=raw.get("total_duration", 0) / 1e9,
+        )
 
     async def health(self) -> bool:
         """True when the Ollama server answers. Used by GET /health."""
