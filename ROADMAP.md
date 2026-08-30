@@ -119,14 +119,34 @@ Conclusions now baked into the code:
 The harness is everything around the model call: how a request becomes a run, what a run carries,
 how it fails, and how you see what happened.
 
-### M1.1 — Model profiles
-A `ModelProfile` describing the active model's capabilities: `context_window`, `supports_vision`,
-`supports_native_tools`, `tool_call_style`, `reliability_tier` (`small` | `large`).
-Selected by config; `qwen3:4b` and `qwen3-27b` are two profiles.
-**Depends on:** M0.2.
-**[4B gap]** This is the single most important abstraction for managing the dev/prod split. Instead
-of scattering `if model == "4b"` checks, behavior branches read the profile: prompt-format tool
-calling vs native, max loop iterations, whether the image path is even offered.
+### [x] M1.1 — Model profiles — DONE (2026-08-30)
+
+Shipped [app/core/model_profile.py](../app/core/model_profile.py): a frozen `ModelProfile`
+dataclass (`name, context_window, supports_vision, supports_native_tools, tool_call_style
+[native|prompt|none], reliability_tier [small|large]`) plus `get_model_profile(model_name)`,
+keyed by exact Ollama tag. Registered: `qwen3:4b` and `qwen3:8b` (both `small`, no vision, no
+native tools, prompt-style tool calling), `qwen3.8-27b` (`large`, vision, native tools). An
+unregistered `model_name` falls back to a conservative default profile with a logged warning,
+instead of guessing or crashing.
+
+Wired in, not left dead:
+- `Settings.model_profile` — a property on `settings`, so `settings.model_name` is still the one
+  source of truth; nothing else needs to be kept in sync.
+- `lifespan.py` logs the active tier on startup and **warns if `MODEL_NUM_CTX` exceeds the
+  profile's `context_window`** — a real misconfiguration guard, not just informational.
+- `GET /health` now reports `model_tier` and `supports_vision`, so tier is visible to whatever
+  calls this service (the Go gateway, monitoring) without reading logs.
+- `UIUXAgent` logs (does not block) when a request includes `image_base64` but the active
+  profile has no vision support — diagnostic breadcrumb only; the field stays accepted on every
+  model, matching the "vision stays optional and unblocking" decision in `CLAUDE.md`.
+
+Deliberately NOT done here (belongs to later milestones that consume the profile, not this one):
+`tool_call_style` and `supports_native_tools` are declared but unused until Phase 2 (M2.2 branches
+tool-call parsing on this field). `reliability_tier` is unused until M4.3 (loop iteration caps per
+tier). Do not wire those early — the profile's job in M1.1 was only to exist as a single source of
+truth; consuming it for tools/loop belongs to those milestones.
+
+**Depends on:** M0.2. ✅
 
 ### M1.2 — Error handling and resilience — PARTIALLY DONE
 - [x] Exception hierarchy (`CatronautError` → `ProviderError` / `UnknownDomainError` /
@@ -366,9 +386,10 @@ adapter swapping (latency cost) — measure before choosing.
 
 ```
 [x] M0.1 → M0.2 → M0.3 → M0.4 → M0.5   (service boots — DONE)
+[x] M1.1                                (model profiles — DONE)
 [x] M1.3                                (declarative registry — DONE, landed early)
 [~] M1.2                                (errors done; bounded retry still open)
-    M1.1 → M1.4 → M1.5                  (harness: profiles, run context, observability)
+    M1.4 → M1.5                         (harness: run context, observability)
     M2.1 → M2.2 → M2.3                  (tool format frozen — hard gate for the loop)
     M3.1 → M3.2 → M3.3 → M3.4           (context budget)
     M4.1 → M4.2 → M4.3                  (loop; M4.4 optional, prod only)
@@ -377,9 +398,9 @@ adapter swapping (latency cost) — measure before choosing.
     M2.4 lands after M5.4.
 ```
 
-**Next up: M1.1 (ModelProfile).** It is the cheapest way to stop dev/prod differences from
-spreading — the `</think>` quirk, the vision gap, and the timeout are already three
-model-specific behaviours living in config and a regex.
+**Next up: M1.4 (RunContext).** M1.1 landed; M1.4 needs it (a run's token budget and tool trace
+are meaningless without knowing which model profile is active). M1.2's retry is the other easy
+pickup if a smaller task is wanted first.
 
 **Decisions settled (2026-08-29) — do not re-ask:**
 - **Prod model tag: `qwen3.8-27b`.** Verified the same day: it 404s from the public Ollama library,

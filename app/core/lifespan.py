@@ -26,13 +26,23 @@ async def lifespan(app: FastAPI):
     app.state.model_provider = model_provider
     app.state.orchestrator = orchestrator
 
+    profile = settings.model_profile
     logger.info(
-        "started env=%s model=%s num_ctx=%d domains=%s",
+        "started env=%s model=%s tier=%s num_ctx=%d domains=%s",
         settings.app_env,
         settings.model_name,
+        profile.reliability_tier,
         settings.model_num_ctx,
         orchestrator.domains,
     )
+    if settings.model_num_ctx > profile.context_window:
+        logger.warning(
+            "MODEL_NUM_CTX=%d exceeds the %s profile's context_window=%d; Ollama may reject "
+            "or clamp this request.",
+            settings.model_num_ctx,
+            profile.name,
+            profile.context_window,
+        )
 
     try:
         yield

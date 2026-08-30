@@ -4,13 +4,17 @@
 
 ## STATUS (update this block whenever work lands)
 
-- **Last synced with code:** 2026-08-29
-- **Branch:** `feat/ollama-setup-qwen`
-- **Done:** ROADMAP Phase 0 (M0.1–M0.5) + M1.3. M1.2 partial (errors done, retry open).
-  The service boots and answers with a real `qwen3:4b`. 8 tests pass.
-- **Next up:** ROADMAP M1.1 — `ModelProfile`.
+- **Last synced with code:** 2026-08-30
+- **Branch:** `feat/model-profile` (off `develop`, not yet merged)
+- **Done:** ROADMAP Phase 0 (M0.1–M0.5) + M1.1 + M1.3. M1.2 partial (errors done, retry open).
+  Phase 0 + M1.3 are merged to `develop` via PR #4; M1.1 is on this branch, not yet merged.
+  The service boots and answers with a real `qwen3:4b`. 12 tests pass.
+- **Next up:** ROADMAP M1.4 — `RunContext` (needs M1.1, which is now done). M1.2's bounded retry
+  is the smaller pickup if that's preferred first.
 - **Do not redo Phase 0.** The missing `config.py`, missing `model_provider/`, UTF-16
   `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**.
+- **Git flow note:** PR #2 merged straight to `main` and had to be reverted (PR #3) — `main` only
+  takes promotions from `develop`, never a direct feature-branch target. See §7.
 
 ---
 
@@ -124,6 +128,7 @@ app/
 │   └── ui_ux.py                POST /ui-ux/analyze
 ├── core/
 │   ├── config.py               pydantic-settings `Settings` + `settings` singleton
+│   ├── model_profile.py        ModelProfile (context/vision/tools/tier) + get_model_profile()
 │   ├── exceptions.py           CatronautError tree + register_exception_handlers()
 │   ├── lifespan.py             startup: OllamaProvider + Orchestrator; shutdown: aclose()
 │   ├── agent_base.py           abstract `Agent`, plus `_build_output()`
@@ -143,7 +148,8 @@ app/
 Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `models/base`, `models/adapters/{ui_ux,code_review}`, `data/{raw,processed,vectorstore}`,
 `evaluation/{datasets/{ui_ux,code_review},results,scripts}`, `configs/`,
-`scripts/smoke_test.py`, `tests/test_api.py`.
+`scripts/smoke_test.py`, `tests/test_api.py` (12 tests), `docs/FLOW.md` (see §5 for its
+English-only exception).
 
 ## 5. Conventions — follow these
 
@@ -158,6 +164,9 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 - **DI via `app.state`**, read off `Request` in the route. `Depends()` is not used yet.
 - **Config**: one `settings` object from `app.core.config`. Never read `os.environ` directly.
   `Settings` sets `protected_namespaces=()` because pydantic v2 reserves the `model_` prefix.
+- **Model-specific behaviour goes through `settings.model_profile`, never `if model_name == ...`.**
+  Add a new model by adding an entry to `_PROFILES` in `app/core/model_profile.py`; an unregistered
+  tag falls back to a conservative profile with a logged warning rather than guessing.
 - **Errors**: raise a `CatronautError` subclass; the handler maps it to
   `{"error": {"code", "message"}}`. Never let a bare exception reach the client.
   `ProviderError` → 502, `UnknownDomainError` → 404, `DomainError` → 422.
@@ -165,8 +174,11 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 - **`raw` in responses is dev-only**, gated by `settings.expose_raw_response`.
 - **Tests stub the model.** Real generation takes minutes; live checks go in
   `scripts/smoke_test.py`, not in pytest.
-- **Docs are English-only.** No bilingual sections in `.md` files. (Chat explanations stay in
-  Vietnamese — that is a separate preference.)
+- **Project docs (`CLAUDE.md`, `README.md`, `ROADMAP.md`) are English-only.** No bilingual
+  sections. `docs/FLOW.md` is a deliberate exception — a Vietnamese, newbie-facing code
+  walkthrough, not a project-infrastructure doc — and stays Vietnamese. Don't translate it or
+  use it as precedent for the others. (Chat explanations stay in Vietnamese regardless — that's
+  a separate, standing preference.)
 
 ## 6. Still open / not yet done
 
@@ -180,21 +192,23 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 **Known limitations of the current implementation:**
 
 1. **No retry.** A transport failure surfaces immediately as 502. Bounded retry is ROADMAP M1.2.
-2. **No `ModelProfile` abstraction yet** (ROADMAP M1.1) — this is the next task. Model-specific
-   behaviour currently lives in config values and one regex. Before adding a second model,
-   introduce the profile rather than scattering `if model == ...` checks.
-3. **No tools, no loop, no RAG, no context budgeting, no session/history.** `UIUXAgent` is
+2. **No tools, no loop, no RAG, no context budgeting, no session/history.** `UIUXAgent` is
    single-shot and stateless. This is the whole remaining ROADMAP.
-4. **`ModelProvider.embed` raises `NotImplementedError`** by design (ROADMAP M5.3), and the dev
+3. **`ModelProvider.embed` raises `NotImplementedError`** by design (ROADMAP M5.3), and the dev
    Ollama runner has embeddings disabled anyway.
-5. **No CI, no linter/formatter config.** `configs/` is still empty.
-6. **Local pip is broken by an unrelated env var**: `PostgreSQL\15\ssl\certs\ca-bundle.crt` is set
+4. **No CI, no linter/formatter config.** `configs/` is still empty.
+5. **Local pip is broken by an unrelated env var**: `PostgreSQL\15\ssl\certs\ca-bundle.crt` is set
    as the CA bundle and does not exist. Workaround used when installing:
    `REQUESTS_CA_BUNDLE=$(python -c "import certifi;print(certifi.where())")`.
 
 ## 7. Working agreement
 
-- Branches: `feat/<topic>` (currently `feat/ollama-setup-qwen`). `main` and `develop` exist.
+- **Git flow: `feat/<topic>` branches off `develop`, PRs target `develop`. Never target or push
+  to `main` directly.** `main` is a separate, more stable line — promoted from `develop`
+  deliberately, not a default PR target. (PR #2 was merged straight to `main` and had to be
+  reverted for exactly this reason — see `git log main` around 2026-08-30 if the history needs
+  explaining.) Before starting any new branch: `git checkout develop && git pull`, then branch
+  from there.
 - Conventional commits (`feat:`, `fix:`, `chore:`, `refactor:`, `docs:`).
 - Surgical diffs. Don't refactor adjacent code unasked. Pause and confirm before touching more
   than 3 files.
