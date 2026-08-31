@@ -223,14 +223,34 @@ response_tokens=... duration_s=...`. Verified live against `qwen3:4b`.
 
 ## Phase 2 — Tools
 
-### M2.1 — Tool definition and registry
-A `Tool` abstraction: `name`, `description`, Pydantic `args_schema`, `async run(args) -> result`.
-A registry that produces the JSON-schema list for the provider and resolves name → callable.
-Tools live in `app/domains/<domain>/tools/`; core-shared tools in `app/core/tools/`.
-**Depends on:** M1.1.
-**[4B gap]** Write tool schemas for the weak model: flat args (no nested objects), ≤3 params,
-enums over free strings, `snake_case` verb-noun names, one-line descriptions. Cap the exposed tool
-count at ~3–5 per domain in dev — the 4B's selection accuracy falls off sharply beyond that.
+### [x] M2.1 — Tool definition and registry — DONE (2026-08-31)
+
+Shipped [app/core/tools/base.py](../app/core/tools/base.py): `Tool` ABC with `name`,
+`description` (ClassVar), `args_schema: type[BaseModel]`, `async run(self, args: BaseModel) ->
+Any`. `run()` always receives an already-validated `args_schema` instance — a `Tool` subclass
+never sees raw model output; that extraction/validation/repair layer is M2.2, not this milestone.
+
+Shipped [app/core/tools/registry.py](../app/core/tools/registry.py): `ToolRegistry(tools)` —
+raises `ValueError` on a duplicate `name` at construction time, `.get(name)` resolves a tool
+(`None` if unknown), `.schema()` returns a backend-agnostic
+`[{name, description, parameters}]` list (`parameters` from `args_schema.model_json_schema()`)
+for both the native path (Ollama `tools` param) and the prompt-based fallback (M2.2) to read.
+`__len__`/`__iter__` for allowlisting/capping checks in M2.3/M2.4.
+
+Scope deliberately narrow: no concrete tools yet (that's M2.4), no
+`app/domains/<domain>/tools/` directory created yet either — empty scaffolding with nothing to
+put in it. Not wired into `Agent`/`Orchestrator`/`RunContext` yet; `RunContext.tool_results` (from
+M1.4) stays the landing spot once M2.3 exists to fill it. Tests in
+[tests/test_tools.py](../tests/test_tools.py): resolve-by-name, schema shape, duplicate-name
+rejection, `__len__`/`__iter__`, and `run()` on validated args (5 tests, all stub tools — no model
+calls).
+
+**Depends on:** M1.1. ✅
+**[4B gap]** Still applies to whoever writes the *first real* tool at M2.4: flat args (no nested
+objects), ≤3 params, enums over free strings, `snake_case` verb-noun names, one-line descriptions.
+Cap the exposed tool count at ~3–5 per domain in dev — the 4B's selection accuracy falls off
+sharply beyond that. Nothing about `Tool`/`ToolRegistry` itself enforces this; it's a convention
+for whatever populates the registry.
 
 ### M2.2 — Tool-call parsing, validation, repair
 The critical layer. Two paths, chosen by `ModelProfile.tool_call_style`:
@@ -432,7 +452,7 @@ adapter swapping (latency cost) — measure before choosing.
 [x] M0.1 → M0.2 → M0.3 → M0.4 → M0.5   (service boots — DONE)
 [x] M1.1 → M1.2 → M1.3 → M1.4 → M1.5    (Phase 1: harness — DONE. M1.2 retry skipped by decision;
                                           M1.5's JSONL persistence deferred to M6.2 by decision)
-    M2.1 → M2.2 → M2.3                  (tool format frozen — hard gate for the loop)
+[x] M2.1 → M2.2 → M2.3                  (tool format frozen — hard gate for the loop. M2.1 DONE)
     M3.1 → M3.2 → M3.3 → M3.4           (context budget)
     M4.1 → M4.2 → M4.3                  (loop; M4.4 optional, prod only)
     M5.1 → M5.2 → M5.3 → M5.4 → M5.5    (RAG)  [M5.1 can start early, in parallel]
@@ -440,12 +460,12 @@ adapter swapping (latency cost) — measure before choosing.
     M2.4 lands after M5.4.
 ```
 
-**Phase 1 (Harness) is now fully done.** Next up: **Phase 2, starting with M2.1 (tool
-definitions)**. That's the first milestone with a hard downstream gate — M2.2 (tool-call parsing
-style) must be frozen before M4.2 (the loop) can be finalized, so get the tool schema shape right
-before building much on top of it. Verify every tool schema decision against `qwen3:4b`
-(prompt-style tool calling, per its `ModelProfile`) — the 27B's native tool calling is the easy
-case.
+**Phase 1 (Harness) is fully done. M2.1 (tool definitions and registry) is also done.** Next up:
+**M2.2 (tool-call parsing, validation, repair)** — the milestone with a hard downstream gate: its
+tool-call parsing style must be frozen before M4.2 (the loop) can be finalized, so get the tool
+schema shape right before building much on top of it. Verify every tool schema decision against
+`qwen3:4b` (prompt-style tool calling, per its `ModelProfile`) — the 27B's native tool calling is
+the easy case.
 
 **Decisions settled (2026-08-29) — do not re-ask:**
 - **Prod model tag: `qwen3.8-27b`.** Verified the same day: it 404s from the public Ollama library,
