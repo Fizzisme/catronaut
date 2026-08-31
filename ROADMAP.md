@@ -352,17 +352,42 @@ fewer response tokens. Both paths are implemented and tested, and the prompt pat
 fallback for models with no `tools` capability. Still unverified: selection accuracy with 3–5 tools
 in one registry — the probe used one tool, so the ~3–5 cap stays a convention, not a measurement.
 
-### M2.3 — Execution policy
-Timeouts per tool, result-size truncation before the result re-enters context, a read-only vs
-side-effecting classification, and an allowlist per domain.
-**Depends on:** M2.2.
+### [x] M2.3 — Execution policy — DONE (2026-08-31)
+
+Shipped [app/core/tools/executor.py](../app/core/tools/executor.py) — `ToolExecutor.execute(run,
+call)` takes an already-validated `ToolCall` (M2.2) and always returns a `ToolExecutionResult`
+(denied / timed out / errored / succeeded), never a raised exception and never an unbounded
+string. In order: (1) allowlist check via `ToolPolicy`, (2) `tool.run(args)` under
+`asyncio.wait_for(timeout=tool.timeout_s)`, (3) any exception from the tool itself is caught, (4)
+the result string is truncated at `max_result_chars` (default 2000) with a `[truncated]` marker.
+Every result — including denials — is appended to `run.tool_results` (the M1.4 field this was
+reserved for).
+
+Shipped [app/core/tools/policy.py](../app/core/tools/policy.py) — `ToolPolicy`, a name allowlist
+only: `is_allowed(name)`, `allow_all(registry)` for domains/tests with no restriction. Deliberately
+this narrow — capability declaration (`fs_read`/`fs_write`/`network`/`subprocess`) and a single
+`pre_tool_call` enforcement seam is M8.2, which the ROADMAP explicitly defers until the loop is
+stable. Building that now would mean guessing at an enforcement point with no loop to hang it on.
+
+`Tool` (M2.1) gained two class attributes: `read_only: ClassVar[bool]` — **no default**, so a
+side-effecting tool cannot pass as safe by omission — and `timeout_s: ClassVar[float] = 30.0`.
+`read_only`'s one consumer today: `ToolExecutor` logs a side-effecting call's completion at
+WARNING instead of INFO, for an audit trail. It does not gate anything — gating is M8.2's job.
+
+8 new tests in [tests/test_tool_execution.py](../tests/test_tool_execution.py) (52 total):
+allow/deny, timeout, an exception that must not escape the executor, truncation, and that both
+successes and denials land in `run.tool_results`.
+
+**Depends on:** M2.2. ✅
 **[4B gap]** Result truncation is a context-budget concern, not a nicety: one untruncated tool
-result can consume the 4B's entire remaining window.
+result can consume the 4B's entire remaining window. The 2000-char default is a placeholder —
+M4.1's token budgeter is the real owner of this number once it exists.
 
 ### M2.4 — First real tool pack for `ui_ux`
 Concrete, small, useful. Suggested starting set: a contrast/a11y checker, a design-token/heuristic
 lookup (later backed by RAG in M6.4), and a structured-report formatter.
-**Depends on:** M2.3, and benefits from M6.4 for the lookup tool.
+**Depends on:** M2.3 (done — this milestone is unblocked), and benefits from M6.4 for the lookup
+tool.
 
 ---
 
@@ -692,7 +717,7 @@ they diverge — see the note under "Dependency overview".
 [x] M1.1 → M1.2 → M1.3 → M1.4 → M1.5    (Phase 1: runtime — DONE. M1.2 retry skipped by decision;
                                           M1.5's JSONL persistence deferred to M7.2 by decision)
 [x] M2.1 → M2.2 → M2.3                  (tool format frozen — hard gate for the loop.
-                                          M2.1 + M2.2 DONE; envelope frozen)
+                                          ALL THREE DONE. M2.4 unblocked, still not started)
     M4.1 → M4.2 → M4.3 → M4.4           (context budget)
     M5.1 → M5.2 → M5.3                  (loop; M5.4 optional, prod only)
     M6.1 → M6.2 → M6.3 → M6.4 → M6.5    (RAG)  [M6.1 can start early, in parallel]
@@ -703,14 +728,14 @@ they diverge — see the note under "Dependency overview".
     M8.1 → M8.2 → [M8.3 only if a trigger fires] → M8.4   (hooks, permissions, sub-agents LAST)
 ```
 
-**Phase 1 (Runtime) is fully done, and Phase 2 is done through M2.2 — the tool-call envelope is
-frozen, which unblocks M5.2.** Next up: **M2.3 (execution policy)** — per-tool timeouts,
-result truncation before a result re-enters context, read-only vs side-effecting classification,
-and a per-domain allowlist. After that M2.4 (the first real tool pack) has everything it needs,
-though the ROADMAP has it landing after M6.4 so the lookup tool can be RAG-backed.
+**Phase 1 (Runtime) is fully done, and Phase 2 is done through M2.3 — definition, parsing, and
+execution policy all exist and are tested.** Next up: **M2.4 (the first real tool pack)** — it now
+has everything it depends on, though the ROADMAP suggests landing it after M6.4 so the
+design-token lookup tool can be RAG-backed instead of hardcoded.
 
-Nothing calls the resolver yet: wiring it into an agent is the loop's job (M5.1/M5.2), and doing
-it earlier would mean writing a mini-loop inside `UIUXAgent` and then deleting it.
+Nothing calls `ToolCallResolver` or `ToolExecutor` yet: wiring them into an agent is the loop's
+job (M5.1/M5.2), and doing it earlier would mean writing a mini-loop inside `UIUXAgent` and then
+deleting it.
 
 **M3.1 (skill loading) is the one item that can be picked up out of order** — it depends only on
 M2.1 and M1.3, both done, and it is a self-contained registry. Useful if Phase 4 stalls.

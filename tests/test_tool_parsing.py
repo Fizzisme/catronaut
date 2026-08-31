@@ -34,6 +34,7 @@ class _ContrastTool(Tool):
     name = "check_contrast"
     description = "Check the WCAG contrast ratio between two hex colors."
     args_schema = _ContrastArgs
+    read_only = True
 
     async def run(self, args: _ContrastArgs) -> str:
         return f"{args.foreground} on {args.background}"

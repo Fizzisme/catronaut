@@ -16,6 +16,7 @@ class _EchoTool(Tool):
     name = "echo_text"
     description = "Echo the given text back."
     args_schema = _EchoArgs
+    read_only = True
 
     async def run(self, args: _EchoArgs) -> str:
         return args.text
@@ -29,6 +30,7 @@ class _OtherTool(Tool):
     name = "double_value"
     description = "Double an integer."
     args_schema = _OtherArgs
+    read_only = True
 
     async def run(self, args: _OtherArgs) -> int:
         return args.value * 2
