@@ -44,6 +44,16 @@ class ModelProvider(ABC):
         """
         raise NotImplementedError
 
+    def extract_tool_calls(self, raw: dict[str, Any]) -> list[dict[str, Any]]:
+        """Structured tool calls from a raw response, normalized to
+        `[{"name": str, "arguments": dict}]`. Empty list when the model made none.
+
+        Same reasoning as `extract_content`: where the calls live in the payload
+        (Ollama nests them under `message.tool_calls[].function`) is backend-specific
+        and must not leak into the tool layer. See ROADMAP M2.2.
+        """
+        raise NotImplementedError
+
     def extract_usage(self, raw: dict[str, Any]) -> RunUsage:
         """Pull token/latency metrics out of a raw response. See extract_content — same reason:
         metric field names (e.g. Ollama's `prompt_eval_count` vs. an OpenAI-style `usage.

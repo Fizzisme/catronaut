@@ -29,14 +29,23 @@ class ModelProfile:
 # Keyed by exact Ollama tag. Add an entry here whenever a new model is put behind MODEL_NAME —
 # do not branch on model_name anywhere else in the codebase.
 _PROFILES: dict[str, ModelProfile] = {
+    # Native tool calling MEASURED on 2026-08-31, not assumed: Ollama reports
+    # capabilities ['completion', 'tools', 'thinking'] for this tag, and a real call
+    # returned a well-formed `message.tool_calls` (37.3s, 510 tokens) with the tool call
+    # kept out of `content` entirely. See ROADMAP M2.2. The earlier `False`/`"prompt"`
+    # here was a guess made before the field had a consumer — do not restore it from
+    # memory of the old CLAUDE.md wording.
     "qwen3:4b": ModelProfile(
         name="qwen3:4b",
         context_window=32_768,
         supports_vision=False,
-        supports_native_tools=False,
-        tool_call_style="prompt",
+        supports_native_tools=True,
+        tool_call_style="native",
         reliability_tier="small",
     ),
+    # NOT measured — same family as the 4B and almost certainly also tool-capable, but
+    # nothing has verified it. Left on the prompt path deliberately: the conservative
+    # setting works on every model, so an unverified profile degrades rather than breaks.
     "qwen3:8b": ModelProfile(
         name="qwen3:8b",
         context_window=32_768,

@@ -146,7 +146,11 @@ def test_profile_for_dev_model_is_small_no_vision():
     profile = get_model_profile("qwen3:4b")
     assert profile.reliability_tier == "small"
     assert profile.supports_vision is False
-    assert profile.supports_native_tools is False
+    # Measured 2026-08-31 (ROADMAP M2.2): Ollama reports the `tools` capability for this
+    # tag and a real call returned a well-formed `message.tool_calls`. The profile said
+    # False before that was ever tested — small does not mean tool-incapable.
+    assert profile.supports_native_tools is True
+    assert profile.tool_call_style == "native"
 
 
 def test_profile_for_prod_model_is_large_with_vision():
