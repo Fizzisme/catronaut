@@ -5,7 +5,8 @@
 ## STATUS (update this block whenever work lands)
 
 - **Last synced with code:** 2026-08-31
-- **Branch:** `docs/phase-restructure` (off `develop`). M2.1 merged to `develop` via PR #7.
+- **Branch:** `feat/tool-execution-policy` (off `develop`). M2.1, M2.2, and the phase restructure
+  are all merged to `develop` (PRs #7, #8, #9).
 - **⚠ ROADMAP phases were restructured on 2026-08-31 — milestone numbers moved.** Phase 1 was
   renamed **Runtime** (it is scaffolding, not the agent harness), a new **Phase 3 — Skills** was
   inserted, and the old Phases 3–6 became **4–7**, plus a new **Phase 8 — Extensibility and
@@ -17,10 +18,11 @@
   via PR #4 and PR #6. M1.2 = no retry, by decision; M1.5's JSONL persistence deferred to M7.2, by
   decision — both documented in §6, not loose ends. The service boots and answers with a real
   `qwen3:4b`, with per-run token/latency metrics in the logs.
-- **Phase 2 done through M2.2.** M2.1 (`Tool` ABC + `ToolRegistry`) merged via PR #7. M2.2
-  (`app/core/tools/parsing.py` + `resolver.py`, `ModelProvider.extract_tool_calls`) is on
-  `feat/tool-call-parsing`. **The tool-call envelope is frozen — M5.2 (the loop) is unblocked.**
-  44 tests pass. Nothing calls the resolver yet; wiring it in belongs to M5.1/M5.2.
+- **Phase 2 (Tools) is now fully done: M2.1, M2.2, and M2.3 all shipped.** `Tool`/`ToolRegistry`
+  (M2.1), `parsing.py`/`resolver.py` (M2.2, the tool-call envelope is frozen), and
+  `policy.py`/`executor.py` (M2.3, on `feat/tool-execution-policy`, not yet merged). 52 tests pass.
+  **Nothing calls any of this yet** — `ToolCallResolver` and `ToolExecutor` exist and are tested
+  in isolation, but wiring them into an agent is the loop's job (M5.1/M5.2).
 - **⚠ `qwen3:4b` DOES support native tool calling — measured 2026-08-31, and the profile was
   wrong.** Ollama reports `capabilities: ['completion','tools','thinking']`; a real call returned
   a well-formed `message.tool_calls` (37.3s, 510 tokens). `ModelProfile` now says
@@ -28,9 +30,9 @@
   was a guess from M1.1, made while nothing consumed the field. **Do not restore it.** The prompt
   envelope path is implemented and tested too — it is the fallback for models without the `tools`
   capability, not the 4B's only option.
-- **Next up:** M2.3 (execution policy) — per-tool timeouts, result truncation, read-only vs
-  side-effecting classification, per-domain allowlist. M3.1 (skill loading) can also be picked up
-  out of order; it only needs M2.1 and M1.3, both done.
+- **Next up:** M2.4 (first real tool pack for `ui_ux`) — everything it depends on now exists,
+  though the ROADMAP suggests landing it after M6.4 so the design-token lookup can be RAG-backed
+  instead of hardcoded. M3.1 (skill loading) can also be picked up out of order.
 - **Do not redo Phase 0 or Phase 1.** The missing `config.py`, missing `model_provider/`, UTF-16
   `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**. `ModelProfile`,
   `RunContext`, usage metrics all exist — don't re-derive them.
@@ -173,14 +175,20 @@ app/
 │   │   └── ollama_provider.py  httpx.AsyncClient; error mapping; </think> stripping;
 │   │                           extract_usage() from prompt_eval_count/eval_count/total_duration;
 │   │                           wraps registry schema into Ollama's function envelope; health()
-│   └── tools/                  (M2.1 + M2.2) definitions, registry, parsing — no concrete tools
-│       ├── base.py             Tool ABC: name, description, args_schema, async run(args)
+│   └── tools/                  (M2.1-M2.3) definitions, registry, parsing, execution policy —
+│       │                        no concrete tools yet (M2.4), nothing wired into an agent
+│       ├── base.py             Tool ABC: name, description, args_schema, read_only (no
+│       │                        default), timeout_s (default 30.0), async run(args)
 │       ├── registry.py         ToolRegistry: get(name), schema() -> [{name,description,
 │       │                        parameters}], rejects duplicate names
 │       ├── parsing.py          (M2.2) pure: ToolCall/NoToolCall/ToolCallFailure,
 │       │                        parse_envelope(), validate_call(), build_tool_instructions()
-│       └── resolver.py         (M2.2) ToolCallResolver — native vs prompt path by
-│                                ModelProfile.tool_call_style; exactly ONE repair turn
+│       ├── resolver.py         (M2.2) ToolCallResolver — native vs prompt path by
+│       │                        ModelProfile.tool_call_style; exactly ONE repair turn
+│       ├── policy.py           (M2.3) ToolPolicy — per-domain name allowlist only;
+│       │                        capability declaration is M8.2, not this
+│       └── executor.py         (M2.3) ToolExecutor.execute(run, call) -> ToolExecutionResult;
+│                                allowlist -> timeout -> catch -> truncate; never raises
 ├── domains/
 │   ├── registry.py             AGENT_REGISTRY — the one place a domain is declared
 │   └── ui_ux/
@@ -195,8 +203,8 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `models/base`, `models/adapters/{ui_ux,code_review}`, `data/{raw,processed,vectorstore}`,
 `evaluation/{datasets/{ui_ux,code_review},results,scripts}`, `configs/`,
 `scripts/smoke_test.py` + `scripts/tool_call_check.py` (live M2.2 check, not in pytest),
-`tests/test_api.py` (17) + `tests/test_tools.py` (5) + `tests/test_tool_parsing.py` (22),
-`docs/FLOW.md` (see §5 for its English-only exception).
+`tests/test_api.py` (17) + `tests/test_tools.py` (5) + `tests/test_tool_parsing.py` (22) +
+`tests/test_tool_execution.py` (8), `docs/FLOW.md` (see §5 for its English-only exception).
 
 ## 5. Conventions — follow these
 
@@ -225,6 +233,12 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 - **Tool-call style is read from `ModelProfile.tool_call_style`**, never branched on a model name.
   The prompt envelope `{"tool": ..., "args": {...}}` is frozen (ROADMAP M2.2) — M7.3 plans to
   fine-tune on it, so changing it is an API break, not a refactor.
+- **A validated `ToolCall` runs through `ToolExecutor.execute(run, call)`, never `tool.run(args)`
+  directly.** The executor is what applies the allowlist, the per-tool timeout, and result
+  truncation (ROADMAP M2.3) — calling `run()` directly skips all three.
+- **Every new `Tool` subclass must set `read_only`** (no default, on purpose — see
+  `app/core/tools/base.py`). Forgetting it is a subtle bug, not a loud one: the class still
+  imports fine, it just fails at `ToolExecutor.execute()` when it reads `tool.read_only`.
 - **Token/latency metrics go through `ModelProvider.extract_usage(raw) -> RunUsage`, never read
   off `raw` directly in `agent_base.py` or a domain agent.** Same reasoning as `extract_content`:
   the field names (`prompt_eval_count`, `eval_count`, `total_duration` for Ollama) are
@@ -271,11 +285,12 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
    The Go gateway already retries; adding a second retry layer here would stack with it and risk
    multi-minute worst-case latency on top of the 44s–600s a single call already takes. Do not
    re-add this without a reason that outweighs that.
-2. **No tool execution, no loop, no RAG, no context budgeting, no session/history.** `UIUXAgent`
-   is still single-shot and stateless. `Tool`/`ToolRegistry` (M2.1) and the parsing/repair layer
-   (M2.2) exist and are tested, but **nothing calls them** — no execution policy (M2.3), no
-   concrete tools (M2.4), not wired into `Agent`/`Orchestrator`. Wiring belongs to the loop
-   (M5.1/M5.2); doing it earlier means building a mini-loop in `UIUXAgent` and deleting it later.
+2. **No loop, no RAG, no context budgeting, no session/history, and no agent uses the tool
+   layer.** `UIUXAgent` is still single-shot and stateless. The entire tool layer — `Tool` /
+   `ToolRegistry` (M2.1), parsing/repair (M2.2), and now allowlist/timeout/truncation (M2.3) —
+   exists and is tested in isolation, but **nothing calls it**: no concrete tools (M2.4), not
+   wired into `Agent`/`Orchestrator`. Wiring belongs to the loop (M5.1/M5.2); doing it earlier
+   means building a mini-loop in `UIUXAgent` and deleting it later.
 3. **No skills, no lifecycle hooks, no permission layer, no sub-agents.** Added to the ROADMAP on
    2026-08-31 after a taxonomy audit, none of them built: skills are Phase 3 (M3.1–M3.3), and
    hooks / permissions / sandbox-if-triggered / sub-agents are Phase 8 (M8.1–M8.4). Behavior that
