@@ -4,19 +4,23 @@
 
 ## STATUS (update this block whenever work lands)
 
-- **Last synced with code:** 2026-08-30
-- **Branch:** `feat/model-profile` (off `develop`, PR #5 open against `develop`, not yet merged)
-- **Done: ROADMAP Phase 0 AND Phase 1 in full** (M0.1–M0.5, M1.1–M1.5). M1.2 = no retry, by
-  decision; M1.5's JSONL persistence deferred to M6.2, by decision — both documented in §6, not
-  loose ends. Phase 0 + M1.3 are merged to `develop` via PR #4; M1.1/M1.2/M1.4/M1.5 are on this
-  branch (PR #5), not yet merged. The service boots and answers with a real `qwen3:4b`, with
-  per-run token/latency metrics in the logs. 17 tests pass.
-- **Next up:** ROADMAP Phase 2, starting with M2.1 (tool definitions). First hard gate: M2.2's
-  tool-call parsing style must be frozen before M4.2 (the loop) can be finalized — verify every
-  tool schema decision against `qwen3:4b` (prompt-style tool calling per its `ModelProfile`)
-  before assuming the 27B's native tool calling.
-- **Do not redo Phase 0.** The missing `config.py`, missing `model_provider/`, UTF-16
-  `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**.
+- **Last synced with code:** 2026-08-31
+- **Branch:** `feat/tool-registry` (off `develop`, not yet pushed/PR'd)
+- **Done: ROADMAP Phase 0 AND Phase 1 in full** (M0.1–M0.5, M1.1–M1.5), all merged to `develop`
+  via PR #4 and PR #6. M1.2 = no retry, by decision; M1.5's JSONL persistence deferred to M6.2, by
+  decision — both documented in §6, not loose ends. The service boots and answers with a real
+  `qwen3:4b`, with per-run token/latency metrics in the logs.
+- **Phase 2 started: M2.1 done (tool definition + registry), on this branch, not yet merged.**
+  Shipped `app/core/tools/base.py` (`Tool` ABC) and `app/core/tools/registry.py`
+  (`ToolRegistry`) — see ROADMAP.md M2.1 for the frozen shapes. No concrete tools yet (M2.4), not
+  wired into `Agent`/`Orchestrator` yet (that needs M2.2/M2.3 first). 22 tests pass (17 + 5 new).
+- **Next up:** M2.2 (tool-call parsing, validation, repair) — the hard gate. Its tool-call
+  envelope must be frozen before M4.2 (the loop) can be finalized — verify every schema decision
+  against `qwen3:4b` (prompt-style tool calling per its `ModelProfile`) before assuming the 27B's
+  native tool calling.
+- **Do not redo Phase 0 or Phase 1.** The missing `config.py`, missing `model_provider/`, UTF-16
+  `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**. `ModelProfile`,
+  `RunContext`, usage metrics all exist — don't re-derive them.
 - **Git flow note:** PR #2 merged straight to `main` and had to be reverted (PR #3) — `main` only
   takes promotions from `develop`, never a direct feature-branch target. See §7.
 
@@ -139,12 +143,16 @@ app/
 │   ├── agent_base.py           abstract `Agent`; `_new_run_context()`; `_build_output()` also
 │   │                           extracts usage + logs the structured "done" line (M1.5)
 │   ├── orchestrator.py         domain -> agent instance; raises UnknownDomainError
-│   └── model_provider/
-│       ├── base.py             ModelProvider ABC: chat(), aclose(), extract_content(),
-│       │                       extract_usage() -> RunUsage, embed()
-│       └── ollama_provider.py  httpx.AsyncClient; error mapping; </think> stripping;
-│                               extract_usage() from prompt_eval_count/eval_count/total_duration;
-│                               health()
+│   ├── model_provider/
+│   │   ├── base.py             ModelProvider ABC: chat(), aclose(), extract_content(),
+│   │   │                       extract_usage() -> RunUsage, embed()
+│   │   └── ollama_provider.py  httpx.AsyncClient; error mapping; </think> stripping;
+│   │                           extract_usage() from prompt_eval_count/eval_count/total_duration;
+│   │                           health()
+│   └── tools/                  (M2.1) definition + registry only — no concrete tools yet
+│       ├── base.py             Tool ABC: name, description, args_schema, async run(args)
+│       └── registry.py         ToolRegistry: get(name), schema() -> [{name,description,
+│                                parameters}], rejects duplicate names
 ├── domains/
 │   ├── registry.py             AGENT_REGISTRY — the one place a domain is declared
 │   └── ui_ux/
@@ -158,8 +166,8 @@ app/
 Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `models/base`, `models/adapters/{ui_ux,code_review}`, `data/{raw,processed,vectorstore}`,
 `evaluation/{datasets/{ui_ux,code_review},results,scripts}`, `configs/`,
-`scripts/smoke_test.py`, `tests/test_api.py` (17 tests), `docs/FLOW.md` (see §5 for its
-English-only exception).
+`scripts/smoke_test.py`, `tests/test_api.py` (17 tests) + `tests/test_tools.py` (5 tests),
+`docs/FLOW.md` (see §5 for its English-only exception).
 
 ## 5. Conventions — follow these
 
@@ -217,8 +225,10 @@ English-only exception).
    The Go gateway already retries; adding a second retry layer here would stack with it and risk
    multi-minute worst-case latency on top of the 44s–600s a single call already takes. Do not
    re-add this without a reason that outweighs that.
-2. **No tools, no loop, no RAG, no context budgeting, no session/history.** `UIUXAgent` is
-   single-shot and stateless. This is the whole remaining ROADMAP.
+2. **No tool execution, no loop, no RAG, no context budgeting, no session/history.** `UIUXAgent`
+   is still single-shot and stateless. `Tool`/`ToolRegistry` exist (M2.1) but nothing calls them
+   yet — no parsing of model tool-call output (M2.2), no execution policy (M2.3), no concrete
+   tools (M2.4), not wired into `Agent`/`Orchestrator`. This is the remaining ROADMAP.
 3. **`ModelProvider.embed` raises `NotImplementedError`** by design (ROADMAP M5.3), and the dev
    Ollama runner has embeddings disabled anyway.
 4. **No CI, no linter/formatter config.** `configs/` is still empty.
