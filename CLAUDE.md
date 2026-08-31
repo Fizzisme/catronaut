@@ -5,19 +5,26 @@
 ## STATUS (update this block whenever work lands)
 
 - **Last synced with code:** 2026-08-31
-- **Branch:** `feat/tool-registry` (off `develop`, not yet pushed/PR'd)
+- **Branch:** `docs/phase-restructure` (off `develop`). M2.1 merged to `develop` via PR #7.
+- **⚠ ROADMAP phases were restructured on 2026-08-31 — milestone numbers moved.** Phase 1 was
+  renamed **Runtime** (it is scaffolding, not the agent harness), a new **Phase 3 — Skills** was
+  inserted, and the old Phases 3–6 became **4–7**, plus a new **Phase 8 — Extensibility and
+  safety**. So `M3.x` now means *skills*, not context; the context budgeter is `M4.1`, the ReAct
+  loop is `M5.2`, RAG embeddings are `M6.3`, fine-tuning data collection is `M7.2`.
+  **M0.x / M1.x / M2.x kept their numbers**, so every commit message in `git log` is still
+  accurate. If a stale number surfaces anywhere, it is a doc bug — fix it, don't re-derive.
 - **Done: ROADMAP Phase 0 AND Phase 1 in full** (M0.1–M0.5, M1.1–M1.5), all merged to `develop`
-  via PR #4 and PR #6. M1.2 = no retry, by decision; M1.5's JSONL persistence deferred to M6.2, by
+  via PR #4 and PR #6. M1.2 = no retry, by decision; M1.5's JSONL persistence deferred to M7.2, by
   decision — both documented in §6, not loose ends. The service boots and answers with a real
   `qwen3:4b`, with per-run token/latency metrics in the logs.
-- **Phase 2 started: M2.1 done (tool definition + registry), on this branch, not yet merged.**
+- **Phase 2 started: M2.1 done (tool definition + registry), merged via PR #7.**
   Shipped `app/core/tools/base.py` (`Tool` ABC) and `app/core/tools/registry.py`
   (`ToolRegistry`) — see ROADMAP.md M2.1 for the frozen shapes. No concrete tools yet (M2.4), not
   wired into `Agent`/`Orchestrator` yet (that needs M2.2/M2.3 first). 22 tests pass (17 + 5 new).
 - **Next up:** M2.2 (tool-call parsing, validation, repair) — the hard gate. Its tool-call
-  envelope must be frozen before M4.2 (the loop) can be finalized — verify every schema decision
+  envelope must be frozen before M5.2 (the loop) can be finalized — verify every schema decision
   against `qwen3:4b` (prompt-style tool calling per its `ModelProfile`) before assuming the 27B's
-  native tool calling.
+  native tool calling. M3.1 (skill loading) is the one item that can be picked up out of order.
 - **Do not redo Phase 0 or Phase 1.** The missing `config.py`, missing `model_provider/`, UTF-16
   `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**. `ModelProfile`,
   `RunContext`, usage metrics all exist — don't re-derive them.
@@ -32,6 +39,8 @@
 It is not a chatbot wrapper — the design goal is that *each agent domain is a self-contained
 vertical* (its own agent class, prompts, tools, skills, eval dataset, and eventually its own
 LoRA adapter), sitting on top of a shared core (model provider, orchestrator, memory/RAG, config).
+Of those, **skills do not exist yet** — the loading mechanism is ROADMAP M3.1, not shipped. The
+rest of that list is either built or has a milestone.
 
 - **First / current domain: `ui_ux`** — analyzes a UI (text description or screenshot) and returns
   actionable feedback on layout, accessibility, and design consistency. Currently **single-shot**:
@@ -108,7 +117,7 @@ memory:
   There are regression tests for this in `tests/test_api.py`.
 - Reasoning tokens are output tokens: they cost both latency and context budget.
 - `/api/embed` returns *"This server does not support embeddings"* for this runner — RAG will
-  need a dedicated embedding model (ROADMAP M5.3).
+  need a dedicated embedding model (ROADMAP M6.3).
 
 ### Design implications
 
@@ -213,11 +222,21 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 
 - Prod model tag: **`qwen3.8-27b`**. Needs a Modelfile / private registry (see §3).
 - Postgres: **coming later**, on the GPU server; a Neon URL is the likely first form.
-  Stays commented in `.env.example` until ROADMAP M3.4.
+  Stays commented in `.env.example` until ROADMAP M4.4.
 - Vision: **stays optional**. Revisit only after the real 27B runs on prod.
 - Retry: **not implemented here, on purpose** — the Go gateway owns it (see limitation #1 below).
-- Run-log JSONL persistence: **deferred to ROADMAP M6.2**, not built speculatively now — see the
+- Run-log JSONL persistence: **deferred to ROADMAP M7.2**, not built speculatively now — see the
   M1.5 section in `ROADMAP.md` for why.
+- Phase structure (2026-08-31): audited against a 9-component agent-harness taxonomy. Phase 1
+  renamed **Runtime**, **Phase 3 — Skills** inserted, old Phases 3–6 renumbered to 4–7, new
+  **Phase 8 — Extensibility and safety** (hooks → permissions → sandbox-if-triggered →
+  sub-agents). Don't re-audit; see the STATUS block for the number mapping.
+- Sandboxing: **not needed for the `ui_ux` tool pack** — none of its tools execute code, resolve a
+  path, or make outbound requests. A capability declaration plus an allowlist (M8.2) is enough.
+  ROADMAP M8.3 lists the four triggers that would change this, `code_review` running a linter
+  being the first.
+- Sub-agents: **last milestone (M8.4)**, after the loop is stable. Isolated rebuilt context,
+  subset permissions, structured-summary returns — never an inherited parent transcript.
 
 **Known limitations of the current implementation:**
 
@@ -229,10 +248,16 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
    is still single-shot and stateless. `Tool`/`ToolRegistry` exist (M2.1) but nothing calls them
    yet — no parsing of model tool-call output (M2.2), no execution policy (M2.3), no concrete
    tools (M2.4), not wired into `Agent`/`Orchestrator`. This is the remaining ROADMAP.
-3. **`ModelProvider.embed` raises `NotImplementedError`** by design (ROADMAP M5.3), and the dev
+3. **No skills, no lifecycle hooks, no permission layer, no sub-agents.** Added to the ROADMAP on
+   2026-08-31 after a taxonomy audit, none of them built: skills are Phase 3 (M3.1–M3.3), and
+   hooks / permissions / sandbox-if-triggered / sub-agents are Phase 8 (M8.1–M8.4). Behavior that
+   *would* be a hook is currently hardcoded — the "done" log line in `_build_output` (M1.5) is
+   effectively a `run_end` hook, and M2.3's truncation/allowlist will be `post_tool_call` /
+   `pre_tool_call`. M8.1 is a refactor onto a seam, not a rewrite; don't pre-build it.
+4. **`ModelProvider.embed` raises `NotImplementedError`** by design (ROADMAP M6.3), and the dev
    Ollama runner has embeddings disabled anyway.
-4. **No CI, no linter/formatter config.** `configs/` is still empty.
-5. **Local pip is broken by an unrelated env var**: `PostgreSQL\15\ssl\certs\ca-bundle.crt` is set
+5. **No CI, no linter/formatter config.** `configs/` is still empty.
+6. **Local pip is broken by an unrelated env var**: `PostgreSQL\15\ssl\certs\ca-bundle.crt` is set
    as the CA bundle and does not exist. Workaround used when installing:
    `REQUESTS_CA_BUNDLE=$(python -c "import certifi;print(certifi.where())")`.
 
