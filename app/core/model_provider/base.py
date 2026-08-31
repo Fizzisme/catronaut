@@ -51,5 +51,5 @@ class ModelProvider(ABC):
         raise NotImplementedError
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed texts for retrieval. Implemented when RAG lands (ROADMAP M5.3)."""
-        raise NotImplementedError("Embeddings are not implemented yet (ROADMAP M5.3)")
+        """Embed texts for retrieval. Implemented when RAG lands (ROADMAP M6.3)."""
+        raise NotImplementedError("Embeddings are not implemented yet (ROADMAP M6.3)")

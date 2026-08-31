@@ -39,7 +39,7 @@ the GPU server rather than a plain `ollama pull`.
   can take minutes; `MODEL_TIMEOUT_S` defaults to 600.
 - `num_ctx` is always sent explicitly — Ollama's own default is small and truncates silently.
 - Ollama's `/api/embed` is unavailable for this runner ("server does not support embeddings"),
-  so RAG will need a dedicated embedding model (ROADMAP M5.3).
+  so RAG will need a dedicated embedding model (ROADMAP M6.3).
 
 The provider is built **once** at FastAPI startup ([app/core/lifespan.py](app/core/lifespan.py))
 and shared by every domain agent via dependency injection, so the model is never loaded twice.
