@@ -280,17 +280,77 @@ Cap the exposed tool count at ~3–5 per domain in dev — the 4B's selection ac
 sharply beyond that. Nothing about `Tool`/`ToolRegistry` itself enforces this; it's a convention
 for whatever populates the registry.
 
-### M2.2 — Tool-call parsing, validation, repair
-The critical layer. Two paths, chosen by `ModelProfile.tool_call_style`:
-- **native** (27B): use Ollama's `tools` parameter, read `message.tool_calls`.
-- **prompt-based fallback** (4B): instruct a strict JSON envelope, extract with a tolerant parser
-  (strip fences, take the first balanced object), validate against `args_schema`.
+### [x] M2.2 — Tool-call parsing, validation, repair — DONE (2026-08-31)
 
-On validation failure: exactly **one** bounded repair turn feeding the validation error back, then
-give up and surface a structured failure. Never loop repairs.
-**Depends on:** M2.1. **Blocks M5.2 — freeze this format before writing the loop.**
-**[4B gap]** This whole milestone exists because of the 4B. Design the fallback path first and
-verify it on `qwen3:4b`; treat the 27B's native path as the optimization, not the baseline.
+**Measured first, against the real `qwen3:4b` — and the measurement overturned this
+milestone's stated premise.** Ollama reports `capabilities: ['completion', 'tools', 'thinking']`
+for `qwen3:4b`, and all three probes succeeded:
+
+| Probe | Result | Latency | Response tokens |
+|---|---|---|---|
+| Native (`tools` param) | correct `message.tool_calls`, right args | 37.3s | 510 |
+| Prompt envelope | clean `{"tool", "args"}`, unfenced | 29.1s | 633 |
+| No tool needed | plain-text answer, **no invented call** | 20.8s | 466 |
+
+Three consequences, all now in code:
+
+1. **`ModelProfile` for `qwen3:4b` was wrong** — it declared `supports_native_tools=False` /
+   `tool_call_style="prompt"`, guessed back at M1.1 while the field had no consumer. Corrected to
+   `True` / `"native"`, with the measurement in a comment so it is not "fixed" back from memory.
+   `qwen3:8b` is left on the prompt path: same family, but **not measured**.
+2. **The `</think>` leak applies to tool calls too.** All three probes leaked reasoning into
+   `content`; the call or answer follows the bare closing tag.
+3. **On the native path `content` after `</think>` is empty**, and `extract_content` raises on
+   empty content by design. So a tool call must never be resolved through `extract_content` — the
+   resolver asks for structured calls first. There is a regression test for exactly this.
+
+**The frozen envelope** (prompt path) — M7.3 plans to fine-tune on it, so treat it as an API:
+
+```json
+{"tool": "check_contrast", "args": {"foreground": "#999999", "background": "#ffffff"}}
+```
+
+Shipped [app/core/tools/parsing.py](../app/core/tools/parsing.py) — pure, no I/O:
+`ToolCall(name, args, raw_args)` / `NoToolCall(content)` / `ToolCallFailure(reason, detail)`;
+`parse_envelope()` (strips fences, takes the first *balanced* object so leaked reasoning and
+trailing prose do not break it, brace-counting with string/escape awareness); `validate_call()`
+against the registry and `args_schema`; `build_tool_instructions()` for the prompt path.
+
+Shipped [app/core/tools/resolver.py](../app/core/tools/resolver.py) — `ToolCallResolver`, holding
+the milestone's one piece of I/O: **exactly one** repair turn, tested to never loop.
+Path selection is `ModelProfile.tool_call_style`, never a model-name check.
+
+Also shipped, because the tool layer must not read provider-shaped dicts (CLAUDE.md §2,
+invariant #3): `ModelProvider.extract_tool_calls(raw) -> [{"name", "arguments"}]`, implemented in
+`OllamaProvider` (tolerating both dict and JSON-string arguments), plus request-side wrapping of
+`ToolRegistry.schema()` into Ollama's `{"type": "function", ...}` envelope inside the provider.
+
+**Terminal states, frozen for M5.2's loop:** a `NoToolCall` is a *success*, not an error — the 4B
+often answers directly when it could have called a tool, and prose on the repair turn is likewise
+accepted rather than failed.
+
+22 new tests in [tests/test_tool_parsing.py](../tests/test_tool_parsing.py) (44 total), including
+the measured 4B strings as regression fixtures and an assertion that the repair fires exactly once.
+
+**End-to-end verified against the live model, not just stubs** — `scripts/tool_call_check.py`
+runs the real `ToolCallResolver` over a real `qwen3:4b` and expects `ToolCall, ToolCall,
+NoToolCall`:
+
+| Scenario | Result | Latency | Response tokens |
+|---|---|---|---|
+| native / needs tool | `ToolCall`, args correct, tool executed | 79.0s | 1045 |
+| prompt / needs tool | `ToolCall`, args correct | 24.7s | 379 |
+| native / no tool needed | `NoToolCall` with a usable answer | 24.3s | 374 |
+
+Note the spread: the same native scenario measured 37.3s/510 tokens in the probe and 79.0s/1045
+in the live check. **Latency and reasoning length on this box vary by more than 2x run to run** —
+do not tune timeouts or token budgets against a single sample.
+**Depends on:** M2.1. ✅ **Blocks M5.2 — this format is now frozen.**
+**[4B gap]** The premise "design the fallback first, native is the 27B's optimization" **did not
+survive contact with the model**: native works on the 4B, is cleaner (no parsing at all), and costs
+fewer response tokens. Both paths are implemented and tested, and the prompt path remains the
+fallback for models with no `tools` capability. Still unverified: selection accuracy with 3–5 tools
+in one registry — the probe used one tool, so the ~3–5 cap stays a convention, not a measurement.
 
 ### M2.3 — Execution policy
 Timeouts per tool, result-size truncation before the result re-enters context, a read-only vs
@@ -631,7 +691,8 @@ they diverge — see the note under "Dependency overview".
 [x] M0.1 → M0.2 → M0.3 → M0.4 → M0.5   (service boots — DONE)
 [x] M1.1 → M1.2 → M1.3 → M1.4 → M1.5    (Phase 1: runtime — DONE. M1.2 retry skipped by decision;
                                           M1.5's JSONL persistence deferred to M7.2 by decision)
-[x] M2.1 → M2.2 → M2.3                  (tool format frozen — hard gate for the loop. M2.1 DONE)
+[x] M2.1 → M2.2 → M2.3                  (tool format frozen — hard gate for the loop.
+                                          M2.1 + M2.2 DONE; envelope frozen)
     M4.1 → M4.2 → M4.3 → M4.4           (context budget)
     M5.1 → M5.2 → M5.3                  (loop; M5.4 optional, prod only)
     M6.1 → M6.2 → M6.3 → M6.4 → M6.5    (RAG)  [M6.1 can start early, in parallel]
@@ -642,12 +703,14 @@ they diverge — see the note under "Dependency overview".
     M8.1 → M8.2 → [M8.3 only if a trigger fires] → M8.4   (hooks, permissions, sub-agents LAST)
 ```
 
-**Phase 1 (Runtime) is fully done. M2.1 (tool definitions and registry) is also done.** Next up:
-**M2.2 (tool-call parsing, validation, repair)** — the milestone with a hard downstream gate: its
-tool-call parsing style must be frozen before M5.2 (the loop) can be finalized, so get the tool
-schema shape right before building much on top of it. Verify every tool schema decision against
-`qwen3:4b` (prompt-style tool calling, per its `ModelProfile`) — the 27B's native tool calling is
-the easy case.
+**Phase 1 (Runtime) is fully done, and Phase 2 is done through M2.2 — the tool-call envelope is
+frozen, which unblocks M5.2.** Next up: **M2.3 (execution policy)** — per-tool timeouts,
+result truncation before a result re-enters context, read-only vs side-effecting classification,
+and a per-domain allowlist. After that M2.4 (the first real tool pack) has everything it needs,
+though the ROADMAP has it landing after M6.4 so the lookup tool can be RAG-backed.
+
+Nothing calls the resolver yet: wiring it into an agent is the loop's job (M5.1/M5.2), and doing
+it earlier would mean writing a mini-loop inside `UIUXAgent` and then deleting it.
 
 **M3.1 (skill loading) is the one item that can be picked up out of order** — it depends only on
 M2.1 and M1.3, both done, and it is a self-contained registry. Useful if Phase 4 stalls.

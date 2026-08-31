@@ -1,5 +1,6 @@
 """Ollama-backed implementation of `ModelProvider`."""
 
+import json
 import logging
 import re
 from typing import Any
@@ -51,7 +52,7 @@ class OllamaProvider(ModelProvider):
             "options": {"num_ctx": self._num_ctx, **options},
         }
         if tools:
-            payload["tools"] = tools
+            payload["tools"] = [self._as_ollama_tool(tool) for tool in tools]
 
         try:
             response = await self._client.post("/api/chat", json=payload)
@@ -66,6 +67,45 @@ class OllamaProvider(ModelProvider):
             ) from exc
         except httpx.HTTPError as exc:
             raise ProviderError(f"Cannot reach model backend: {exc}") from exc
+
+    @staticmethod
+    def _as_ollama_tool(tool: dict[str, Any]) -> dict[str, Any]:
+        """Wrap `ToolRegistry.schema()`'s neutral entry in Ollama's function envelope.
+
+        The registry stays backend-agnostic (ROADMAP M2.1), so the request shape is
+        applied here — the same rule that keeps response-shape knowledge in the provider.
+        An entry that already carries a `function` key is passed through untouched.
+        """
+        if "function" in tool:
+            return tool
+        return {
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "parameters": tool.get("parameters", {}),
+            },
+        }
+
+    def extract_tool_calls(self, raw: dict[str, Any]) -> list[dict[str, Any]]:
+        message = raw.get("message")
+        if not isinstance(message, dict):
+            return []
+
+        calls = []
+        for entry in message.get("tool_calls") or []:
+            function = entry.get("function") if isinstance(entry, dict) else None
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                # Ollama sends a dict; OpenAI-compatible backends send a JSON string.
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+            calls.append({"name": function.get("name"), "arguments": arguments})
+        return calls
 
     def extract_content(self, raw: dict[str, Any]) -> str:
         message = raw.get("message")

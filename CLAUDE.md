@@ -17,14 +17,20 @@
   via PR #4 and PR #6. M1.2 = no retry, by decision; M1.5's JSONL persistence deferred to M7.2, by
   decision — both documented in §6, not loose ends. The service boots and answers with a real
   `qwen3:4b`, with per-run token/latency metrics in the logs.
-- **Phase 2 started: M2.1 done (tool definition + registry), merged via PR #7.**
-  Shipped `app/core/tools/base.py` (`Tool` ABC) and `app/core/tools/registry.py`
-  (`ToolRegistry`) — see ROADMAP.md M2.1 for the frozen shapes. No concrete tools yet (M2.4), not
-  wired into `Agent`/`Orchestrator` yet (that needs M2.2/M2.3 first). 22 tests pass (17 + 5 new).
-- **Next up:** M2.2 (tool-call parsing, validation, repair) — the hard gate. Its tool-call
-  envelope must be frozen before M5.2 (the loop) can be finalized — verify every schema decision
-  against `qwen3:4b` (prompt-style tool calling per its `ModelProfile`) before assuming the 27B's
-  native tool calling. M3.1 (skill loading) is the one item that can be picked up out of order.
+- **Phase 2 done through M2.2.** M2.1 (`Tool` ABC + `ToolRegistry`) merged via PR #7. M2.2
+  (`app/core/tools/parsing.py` + `resolver.py`, `ModelProvider.extract_tool_calls`) is on
+  `feat/tool-call-parsing`. **The tool-call envelope is frozen — M5.2 (the loop) is unblocked.**
+  44 tests pass. Nothing calls the resolver yet; wiring it in belongs to M5.1/M5.2.
+- **⚠ `qwen3:4b` DOES support native tool calling — measured 2026-08-31, and the profile was
+  wrong.** Ollama reports `capabilities: ['completion','tools','thinking']`; a real call returned
+  a well-formed `message.tool_calls` (37.3s, 510 tokens). `ModelProfile` now says
+  `supports_native_tools=True`, `tool_call_style="native"` for that tag. The old `False`/`"prompt"`
+  was a guess from M1.1, made while nothing consumed the field. **Do not restore it.** The prompt
+  envelope path is implemented and tested too — it is the fallback for models without the `tools`
+  capability, not the 4B's only option.
+- **Next up:** M2.3 (execution policy) — per-tool timeouts, result truncation, read-only vs
+  side-effecting classification, per-domain allowlist. M3.1 (skill loading) can also be picked up
+  out of order; it only needs M2.1 and M1.3, both done.
 - **Do not redo Phase 0 or Phase 1.** The missing `config.py`, missing `model_provider/`, UTF-16
   `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**. `ModelProfile`,
   `RunContext`, usage metrics all exist — don't re-derive them.
@@ -93,7 +99,7 @@ Invariants the code honors — **keep these**:
 | Serving | Ollama on a GPU server | Ollama 0.33.1 |
 | Vision | Yes | **No** — `qwen3:4b` / `qwen3:8b` are text-only |
 | Speed | GPU | **CPU-only here, ~8 tok/s measured** |
-| Tool calling | Reliable | Weak — expect malformed JSON, hallucinated names, skipped calls |
+| Tool calling | Reliable, native | **Native works** (measured 2026-08-31) — but only tested with one tool |
 
 **On the prod tag:** `qwen3.8-27b` is the decided target. Verified 2026-08-29: it returns **404
 from the public Ollama library** (`registry.ollama.ai/v2/library/qwen3.8-27b`), so it cannot be
@@ -118,6 +124,14 @@ memory:
 - Reasoning tokens are output tokens: they cost both latency and context budget.
 - `/api/embed` returns *"This server does not support embeddings"* for this runner — RAG will
   need a dedicated embedding model (ROADMAP M6.3).
+- **Tool calling works on the 4B, both ways** (measured 2026-08-31, ROADMAP M2.2):
+  - Ollama reports `capabilities: ['completion', 'tools', 'thinking']` for `qwen3:4b`.
+  - Native (`tools` param) → correct `message.tool_calls`, 37.3s, 510 response tokens. **The
+    call goes into the structured field and `content` after `</think>` is empty**, which
+    `extract_content` raises on — so never resolve a tool call through it.
+  - Prompt envelope → clean `{"tool": ..., "args": {...}}`, unfenced, 29.1s, 633 tokens.
+  - Given a question needing no tool, it answered in prose and **did not invent a call**.
+  - Caveat: one tool in the registry. Selection accuracy with 3–5 tools is still unmeasured.
 
 ### Design implications
 
@@ -154,14 +168,19 @@ app/
 │   ├── orchestrator.py         domain -> agent instance; raises UnknownDomainError
 │   ├── model_provider/
 │   │   ├── base.py             ModelProvider ABC: chat(), aclose(), extract_content(),
+│   │   │                       extract_tool_calls() -> [{name,arguments}],
 │   │   │                       extract_usage() -> RunUsage, embed()
 │   │   └── ollama_provider.py  httpx.AsyncClient; error mapping; </think> stripping;
 │   │                           extract_usage() from prompt_eval_count/eval_count/total_duration;
-│   │                           health()
-│   └── tools/                  (M2.1) definition + registry only — no concrete tools yet
+│   │                           wraps registry schema into Ollama's function envelope; health()
+│   └── tools/                  (M2.1 + M2.2) definitions, registry, parsing — no concrete tools
 │       ├── base.py             Tool ABC: name, description, args_schema, async run(args)
-│       └── registry.py         ToolRegistry: get(name), schema() -> [{name,description,
-│                                parameters}], rejects duplicate names
+│       ├── registry.py         ToolRegistry: get(name), schema() -> [{name,description,
+│       │                        parameters}], rejects duplicate names
+│       ├── parsing.py          (M2.2) pure: ToolCall/NoToolCall/ToolCallFailure,
+│       │                        parse_envelope(), validate_call(), build_tool_instructions()
+│       └── resolver.py         (M2.2) ToolCallResolver — native vs prompt path by
+│                                ModelProfile.tool_call_style; exactly ONE repair turn
 ├── domains/
 │   ├── registry.py             AGENT_REGISTRY — the one place a domain is declared
 │   └── ui_ux/
@@ -175,7 +194,8 @@ app/
 Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `models/base`, `models/adapters/{ui_ux,code_review}`, `data/{raw,processed,vectorstore}`,
 `evaluation/{datasets/{ui_ux,code_review},results,scripts}`, `configs/`,
-`scripts/smoke_test.py`, `tests/test_api.py` (17 tests) + `tests/test_tools.py` (5 tests),
+`scripts/smoke_test.py` + `scripts/tool_call_check.py` (live M2.2 check, not in pytest),
+`tests/test_api.py` (17) + `tests/test_tools.py` (5) + `tests/test_tool_parsing.py` (22),
 `docs/FLOW.md` (see §5 for its English-only exception).
 
 ## 5. Conventions — follow these
@@ -198,6 +218,13 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
   and threads it into `self._build_output(run, raw, content)`. Log lines inside `handle()` should
   include `run_id=%s` so a request is traceable end to end; `AgentOutput.run_id` gives the caller
   the same ID for cross-referencing.
+- **Tool calls go through `ModelProvider.extract_tool_calls(raw)`, never `raw["message"]
+  ["tool_calls"]`.** Same rule as `extract_content` / `extract_usage`. And **never resolve a tool
+  call through `extract_content`** — on the native path the 4B leaves `content` empty and
+  `extract_content` raises by design; ask for structured calls first (`ToolCallResolver` does).
+- **Tool-call style is read from `ModelProfile.tool_call_style`**, never branched on a model name.
+  The prompt envelope `{"tool": ..., "args": {...}}` is frozen (ROADMAP M2.2) — M7.3 plans to
+  fine-tune on it, so changing it is an API break, not a refactor.
 - **Token/latency metrics go through `ModelProvider.extract_usage(raw) -> RunUsage`, never read
   off `raw` directly in `agent_base.py` or a domain agent.** Same reasoning as `extract_content`:
   the field names (`prompt_eval_count`, `eval_count`, `total_duration` for Ollama) are
@@ -245,9 +272,10 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
    multi-minute worst-case latency on top of the 44s–600s a single call already takes. Do not
    re-add this without a reason that outweighs that.
 2. **No tool execution, no loop, no RAG, no context budgeting, no session/history.** `UIUXAgent`
-   is still single-shot and stateless. `Tool`/`ToolRegistry` exist (M2.1) but nothing calls them
-   yet — no parsing of model tool-call output (M2.2), no execution policy (M2.3), no concrete
-   tools (M2.4), not wired into `Agent`/`Orchestrator`. This is the remaining ROADMAP.
+   is still single-shot and stateless. `Tool`/`ToolRegistry` (M2.1) and the parsing/repair layer
+   (M2.2) exist and are tested, but **nothing calls them** — no execution policy (M2.3), no
+   concrete tools (M2.4), not wired into `Agent`/`Orchestrator`. Wiring belongs to the loop
+   (M5.1/M5.2); doing it earlier means building a mini-loop in `UIUXAgent` and deleting it later.
 3. **No skills, no lifecycle hooks, no permission layer, no sub-agents.** Added to the ROADMAP on
    2026-08-31 after a taxonomy audit, none of them built: skills are Phase 3 (M3.1–M3.3), and
    hooks / permissions / sandbox-if-triggered / sub-agents are Phase 8 (M8.1–M8.4). Behavior that
