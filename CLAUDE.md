@@ -5,8 +5,8 @@
 ## STATUS (update this block whenever work lands)
 
 - **Last synced with code:** 2026-08-31
-- **Branch:** `feat/ui-ux-tool-pack` (off `develop`). M2.1–M2.3 and the phase restructure are all
-  merged to `develop` (PRs #7–#10).
+- **Branch:** `docs/site-gen-phase9` (off `develop`). M2.1–M2.4 and the phase restructure are all
+  merged to `develop` (PRs #7–#11).
 - **⚠ ROADMAP phases were restructured on 2026-08-31 — milestone numbers moved.** Phase 1 was
   renamed **Runtime** (it is scaffolding, not the agent harness), a new **Phase 3 — Skills** was
   inserted, and the old Phases 3–6 became **4–7**, plus a new **Phase 8 — Extensibility and
@@ -21,9 +21,9 @@
 - **Phase 2 (Tools) is fully done, M2.1 through M2.4 — the whole tool layer through a real tool
   pack.** `Tool`/`ToolRegistry` (M2.1), `parsing.py`/`resolver.py` (M2.2, envelope frozen),
   `policy.py`/`executor.py` (M2.3), and now `app/domains/ui_ux/tools/` — 4 concrete tools:
-  `check_contrast`, `lookup_heuristic`, `format_review`, `fetch_docs` (M2.4, on
-  `feat/ui-ux-tool-pack`, not yet merged). 78 tests pass. **Nothing calls any of this yet** —
-  wiring the tool layer into an agent is the loop's job (M5.1/M5.2).
+  `check_contrast`, `lookup_heuristic`, `format_review`, `fetch_docs` (M2.4, merged). 78 tests
+  pass. **Nothing calls any of this yet** — wiring the tool layer into an agent is the loop's job
+  (M5.1/M5.2).
 - **⚠ `qwen3:4b` DOES support native tool calling — measured 2026-08-31, and the profile was
   wrong.** Ollama reports `capabilities: ['completion','tools','thinking']`; a real call returned
   a well-formed `message.tool_calls` (37.3s, 510 tokens). `ModelProfile` now says
@@ -45,9 +45,21 @@
   typed `str` with no multimodal path back into the message list, and screenshotting needs a
   headless browser this service doesn't otherwise depend on. Don't build it speculatively; see
   the ROADMAP entry for what would need to exist first.
+- **New: ROADMAP Phase 9 — `site_gen` — designed 2026-08-31, ZERO code written.** The user's real
+  long-term direction surfaced: `ui_ux` stays a *reviewer*, but a new domain (`site_gen`) should
+  eventually let a user say "give me an e-commerce site in Nuxt.js" and get real generated project
+  files back. This is documentation only — a new phase with milestones `M9.1`–`M9.6` in
+  `ROADMAP.md`, nothing under `app/`. Two decisions worth remembering so they aren't re-litigated:
+  (1) **separate domain, not a mode inside `ui_ux`** — `ToolPolicy` has no per-mode scoping,
+  `ui_ux` is already at the measured tool cap, and mixing write-capable tools in would falsify the
+  "no sandbox needed for `ui_ux`" claim below; (2) **do not gate the whole phase behind
+  `reliability_tier == "large"`** — `qwen3.8-27b` isn't running anywhere yet, so an all-or-nothing
+  large-only gate would make this phase permanently undone by this project's own rule. Mechanics
+  (workspace, path-sandboxed file tools) are measurable on `qwen3:4b` now; only the *ambition*
+  (a full multi-page site) is large-tier, split out as M9.5 and marked BLOCKED on GPU-server infra.
 - **Next up:** M3.1 (skill loading) is the next milestone that doesn't need anything else to
   start — Phase 2 is done. M4.1 (token budgeter) is the next item in the ROADMAP's suggested
-  build order.
+  build order. M9.1 (workspace primitive) can also start any time — no model, no loop needed.
 - **Do not redo Phase 0 or Phase 1.** The missing `config.py`, missing `model_provider/`, UTF-16
   `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**. `ModelProfile`,
   `RunContext`, usage metrics all exist — don't re-derive them.
@@ -69,6 +81,10 @@ rest of that list is either built or has a milestone.
   actionable feedback on layout, accessibility, and design consistency. Currently **single-shot**:
   one system prompt + one user message + one model call. No tools, no loop, no retrieval yet.
 - **Second domain scaffolded (dirs only, no code): `code_review`**.
+- **Third domain planned, not yet scaffolded: `site_gen`.** Generates a small project's worth of
+  real files from a prompt (e.g. "an e-commerce site in Nuxt.js") rather than reviewing an
+  existing one — a structurally different capability from `ui_ux`. Designed as ROADMAP Phase 9
+  (M9.1–M9.6); nothing under `app/domains/site_gen/` exists yet.
 
 ### This service runs behind an existing Go API gateway
 

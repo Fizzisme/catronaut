@@ -44,6 +44,7 @@ graph TD
   P5 --> P7[Phase 7 — Fine-tuning]
   P6 --> P7
   P5 --> P8[Phase 8 — Extensibility and safety]
+  P5 --> P9[Phase 9 — Code generation workspace]
 ```
 
 The three hard ordering rules:
@@ -785,6 +786,113 @@ and do not spend dev time making it work on the 4B.
 
 ---
 
+## Phase 9 — Code generation workspace (`site_gen`)
+
+A second, structurally different vertical alongside `ui_ux`: instead of reviewing an existing UI,
+`site_gen` writes a real small project — files on disk the user can browse — from a prompt like
+"give me an e-commerce site built with Nuxt.js". New domain, not a mode inside `ui_ux` (decided
+2026-08-31): `ToolPolicy` is a flat per-domain allowlist with no per-mode scoping, `ui_ux` already
+sits at the measured ~3–5 tool cap, and this pack's write/path-taking tools are a different risk
+class than `ui_ux`'s read-mostly pack — mixing them would retroactively falsify CLAUDE.md's current
+claim that `ui_ux` needs no sandbox. See README's "Adding a domain" checklist; `app/core/` stays
+untouched per CLAUDE.md's invariant #4.
+
+**v1 is scoped to one loop run generating into an empty workspace.** Iteratively editing an
+existing project across multiple requests is an explicit non-goal for now — the file tree is
+re-discoverable per run via `list_directory`/`read_file`, so this does not need M4.4 (session
+store) as a dependency. Revisit only if real usage shows the non-goal was wrong.
+
+**Ambition is profile-split, not gated all-or-nothing.** Whether `qwen3:4b` can coherently
+sequence a multi-file generation is unmeasured and must be measured (M9.4), not assumed to fail —
+gating the entire phase behind `reliability_tier == "large"` would make it permanently "not done"
+by this project's own rule, since `qwen3.8-27b` is not running anywhere yet (§3: 404 from the
+public Ollama library). Mirrors M6.4's RAG split (pre-fetch for `small`, retriever-as-tool for
+`large`) rather than declaring the feature large-only.
+
+### M9.1 — Workspace primitive
+A `Workspace` class in `app/core/workspace.py` — new shared core infrastructure, not
+domain-specific, mirroring how `app/core/tools/` was built generically in M2.1 before any concrete
+tool existed (and paid off unmodified at M2.4), and how the RAG memory layer is planned the same
+way ("shared machinery... configured per domain by namespace"). Resolves a `project_id` to a root
+directory under a new `Settings.workspace_root` (default `data/projects`). `resolve(relative_path)
+-> Path` normalizes and hard-rejects `..` segments, absolute paths, and symlink escapes
+(`os.path.realpath` checked against the root — never trust `os.path.join` alone). `project_id`
+itself is validated against a strict charset (e.g. `^[a-z0-9_-]{1,64}$`) *before* being joined into
+any path — the traversal risk exists one level above individual file paths too. Mints a fresh
+`project_id` (`uuid.uuid4().hex[:12]`, matching `RunContext.run_id`'s shape) when none is supplied.
+`.gitignore` gains an explicit `data/projects/*` line plus `.gitkeep` — the existing pattern is
+per-subdirectory, not auto-covered.
+**Depends on:** M0.1 (the `Settings` pattern this reuses). No model call, no loop — pure Python,
+unit-testable today, the same way M2.1's `Tool`/`ToolRegistry` were.
+**[4B gap]** None — this milestone has zero model dependency.
+
+### M9.2 — File tools pack
+Three `Tool` subclasses under `app/domains/site_gen/tools/`: `write_file(path, content)`
+(`read_only=False`), `read_file(path)`, `list_directory(path)` (`read_only=True`). Every path
+argument routes through `Workspace.resolve()` before touching the filesystem — no tool constructs
+a `Path` directly. Flat ≤3-param `args_schema` per the M2.1 [4B gap] convention. Deliberately NOT
+`edit_file`/`delete_file`/`move_file` in v1 — YAGNI; each adds real risk/complexity (diff format,
+accidental self-deletion, dual-path safety) beyond what "generate a new project from scratch"
+needs. Schema-shape regression tests mirroring `tests/test_ui_ux_tools.py` (≤3 params, no nested
+objects).
+**Depends on:** M9.1, M2.1 (`Tool` ABC), M2.3 (`ToolExecutor` — identical execution path to
+`ui_ux`'s pack, no new mechanism needed). Unit-testable now, no loop required — same pattern as
+M2.4.
+**[4B gap]** The first tool pack where M8.3's trigger #2 ("the 4B hallucinates paths, which makes
+traversal reachable") is live on day one, not hypothetical. Live verification against `qwen3:4b`
+must include adversarial prompts attempting `../../`-style escapes, run through the *full*
+`ToolExecutor`, not tested in isolation — mirrors how M2.4's SSRF guard was verified.
+
+### M9.3 — New domain scaffold: `site_gen`
+`app/domains/site_gen/` (`agent.py`, `prompts.py`), one line in `AGENT_REGISTRY`, one router
+(`POST /site-gen/generate`) — the README's 3-step checklist, `app/core/` untouched. `AgentInput`
+gains an optional `project_id: str | None` (distinct from the still-dead `session_id`); when
+omitted, M9.1 mints one and it's echoed back on a new `AgentOutput.project_id`. Scaffolding only —
+no model call wired yet, matching how M1.1's profile scaffolding preceded any real consumer.
+**Depends on:** M1.3 (registry pattern), M9.2 (the tools it will eventually hold).
+**[4B gap]** None yet.
+
+### M9.4 — Wire into the loop: generate a new project (dev-tier, scaled ambition)
+Once M5.2 lands, `SiteGenAgent.handle` builds a `ToolRegistry` from M9.2's 3 tools and a
+`ToolPolicy` scoped to exactly those three — never `allow_all`; this is the one domain where an
+over-broad policy has real consequences. A multi-file generation run accumulates far more
+`tool_results` than a 1–2-call review run, so this domain likely needs its own `max_iterations`
+override on top of M5.3's per-profile default, and benefits more than `ui_ux` does from M4.1's real
+per-run budget. Live-verify against `qwen3:4b` first, per this project's standing rule. Whatever the
+4B can coherently produce — even a trivial 2–3-file scaffold — is the dev-tier deliverable; if it
+can't sequence more than 1–2 calls coherently, that is a measured result that scales the dev-tier
+ambition down, not a reason to block the milestone on GPU-server availability.
+**Depends on:** M5.2 (hard gate), M9.2, M9.3. Soft dependency on M4.1/M4.2 for budget headroom on
+longer runs.
+**[4B gap]** Central and deliberately unresolved by architecture: whether `qwen3:4b` can coherently
+sequence a multi-file generation is unmeasured. Both a "yes, trivial scaffold works" and a "no, it
+loses coherence past 2 calls" result are acceptable, measured outcomes — not failure states.
+
+### M9.5 — Large-tier generation ambition (prod-only stretch)
+Extends generation ambition for `reliability_tier == "large"` to real multi-page/multi-component
+output, likely via M5.4's planner strategy (plan the file list, then execute writes) rather than
+raw ReAct — laying out an unfamiliar multi-file structure resembles M5.4's "multi-part audit"
+planning problem more than a single tool call.
+**Depends on:** M9.4, M5.4. Also depends on infrastructure that does not exist yet.
+**Status: BLOCKED**, not merely "not started" — `qwen3.8-27b` is not pulled or served anywhere (see
+§3); this milestone cannot be attempted until that infrastructure exists, independent of engineering
+readiness. Same distinction already used for the missing RAG embedding model under "Still open."
+**[4B gap]** Not applicable — large-only by definition; do not attempt on the 4B (same phrasing as
+M5.4).
+
+### M9.6 — Reflect this pack in M8.2 / M8.3 (docs-only)
+Add `write_file`/`read_file`/`list_directory` to M8.2's future capability declarations
+(`{"fs_write"}` / `{"fs_read"}` / `{"fs_read"}`) — pre-specified the same way `fetch_docs`'s
+`{"network"}` was written before M8.2 existed. Update M8.3 triggers #2 and #4 to name this pack as
+the concrete instance firing them, mitigated today by M9.1's workspace-root path sandbox — the same
+"tool-local mitigation now, formalize at M8.2 later" pattern already used for `fetch_docs`'s SSRF
+guard, not a new precedent. Correct trigger #4's wording if `workspace_root` ends up outside
+`data/`.
+**Depends on:** M9.2, M8.2/M8.3 (the sections being edited already exist).
+**[4B gap]** N/A — docs-only.
+
+---
+
 ## Suggested execution order
 
 **Phase numbers are conceptual; this block is the build order.** Phase 3 (Skills) is the one place
@@ -794,16 +902,19 @@ they diverge — see the note under "Dependency overview".
 [x] M0.1 → M0.2 → M0.3 → M0.4 → M0.5   (service boots — DONE)
 [x] M1.1 → M1.2 → M1.3 → M1.4 → M1.5    (Phase 1: runtime — DONE. M1.2 retry skipped by decision;
                                           M1.5's JSONL persistence deferred to M7.2 by decision)
-[x] M2.1 → M2.2 → M2.3                  (tool format frozen — hard gate for the loop.
-                                          ALL THREE DONE. M2.4 unblocked, still not started)
+[x] M2.1 → M2.2 → M2.3 → M2.4            (Phase 2: tools — ALL FOUR DONE. Tool-call format frozen,
+                                          the hard gate for the loop, is satisfied)
     M4.1 → M4.2 → M4.3 → M4.4           (context budget)
     M5.1 → M5.2 → M5.3                  (loop; M5.4 optional, prod only)
     M6.1 → M6.2 → M6.3 → M6.4 → M6.5    (RAG)  [M6.1 can start early, in parallel]
     M3.1 → M3.2                         (skills; M3.2 needs M4.1 + M4.2, so after Phase 4)
-    M2.4 lands after M6.4.
-    M3.3 lands after M2.4 (tool packs generalize from one real pack)
+    M3.3 lands after M2.4 (tool packs generalize from one real pack) — unblocked now
     M7.1 → M7.2 → M7.3 → M7.4 → M7.5 → M7.6   (fine-tuning)
     M8.1 → M8.2 → [M8.3 only if a trigger fires] → M8.4   (hooks, permissions, sub-agents LAST)
+    M9.1 → M9.2 → M9.3            (site_gen scaffold; independent of the loop, can start anytime)
+    M9.4                          (needs M5.2 — the loop)
+    M9.5                          (BLOCKED — needs the 27B actually running)
+    M9.6                          (docs-only, after M9.2)
 ```
 
 **Phase 1 (Runtime) is fully done, and Phase 2 is done through M2.3 — definition, parsing, and
@@ -864,6 +975,11 @@ M2.1 and M1.3, both done, and it is a self-contained registry. Useful if Phase 4
   **Do not build this speculatively.** If it becomes a real requirement: design the multimodal
   tool-result path first (as its own milestone, likely adjacent to M8.x), gate the tool behind
   `model_profile.supports_vision`, and verify on the 27B — not on `qwen3:4b`, which cannot run it.
+- **Phase 9's project workspace has no lifecycle story.** No cleanup/quota for abandoned
+  `data/projects/<id>/` directories, and no user/tenant scoping of `project_id` — there is no
+  consuming auth model today to scope it to (see CLAUDE.md §1: per-user context, if ever needed,
+  arrives as a gateway-injected header, not something this service tracks itself). Both named,
+  neither built — same "don't build until a trigger fires" posture as M8.3.
 
 ---
 
