@@ -45,26 +45,41 @@
   typed `str` with no multimodal path back into the message list, and screenshotting needs a
   headless browser this service doesn't otherwise depend on. Don't build it speculatively; see
   the ROADMAP entry for what would need to exist first.
-- **New: ROADMAP Phase 9 — `site_gen` — designed 2026-08-31, ZERO code written.** The user's real
-  long-term direction surfaced: `ui_ux` stays a *reviewer*, but a new domain (`site_gen`) should
-  eventually let a user say "give me an e-commerce site in Nuxt.js" and get real generated project
-  files back. This is documentation only — a new phase with milestones `M9.1`–`M9.6` in
-  `ROADMAP.md`, nothing under `app/`. Two decisions worth remembering so they aren't re-litigated:
-  (1) **separate domain, not a mode inside `ui_ux`** — `ToolPolicy` has no per-mode scoping,
-  `ui_ux` is already at the measured tool cap, and mixing write-capable tools in would falsify the
-  "no sandbox needed for `ui_ux`" claim below; (2) **do not gate the whole phase behind
-  `reliability_tier == "large"`** — `qwen3.8-27b` isn't running anywhere yet, so an all-or-nothing
-  large-only gate would make this phase permanently undone by this project's own rule. Mechanics
-  (workspace, path-sandboxed file tools) are measurable on `qwen3:4b` now; only the *ambition*
-  (a full multi-page site) is large-tier, split out as M9.5 and marked BLOCKED on GPU-server infra.
+- **New: ROADMAP Phase 9 — `site_gen` — designed 2026-08-31, ZERO code written.** A new domain
+  where a user says "build me an e-commerce site" and gets **real generated files back, previewed
+  in the browser** — plus follow-ups like "that button's colour is wrong", which the agent fixes by
+  reading and rewriting the file. Documentation only: milestones `M9.1`–`M9.8` in `ROADMAP.md`,
+  nothing under `app/`. Decisions that must not be re-litigated:
+  - **Separate domain, not a mode inside `ui_ux`** — `ToolPolicy` has no per-mode scoping, `ui_ux`
+    is already at the measured tool cap, and mixing write-capable tools in would falsify the
+    `ui_ux` sandbox claim in §6.
+  - **This service never builds or runs generated code.** Preview is **Sandpack** (MIT) in the
+    user's browser — zero server cost. StackBlitz WebContainer was rejected: commercial licence
+    required, and its mandatory COEP/COOP headers risk breaking the Next.js frontend.
+    **Consequence: M8.3 sandboxing is off the path entirely** — trigger #1 never fires.
+  - **Sandpack has no `nuxt` template → unsupported frameworks fall back to `vite-react`**, and
+    the response must say so.
+  - **Stateless.** Workspace lives on disk keyed by `project_id`; conversation `history` is
+    re-sent by the client each turn. **M4.4 session store is not needed** for either the discovery
+    loop or iterative editing.
+  - **Ambition is profile-split, not gated all-or-nothing** — `qwen3.8-27b` isn't running
+    anywhere, so a large-only gate would make the phase permanently undone by this project's own
+    rule. Mechanics are measurable on `qwen3:4b` now; only the full multi-page ambition is
+    large-tier (M9.7, BLOCKED on GPU-server infra).
+  - **Skills matter here and are on the path** (M3.1 → M9.6): skill content starts from
+    OpenDesign's `SKILL.md` design-pattern files — verified **Apache-2.0, no NOTICE file**, so
+    reuse is permitted with attribution. **RAG waits** until M6.1 decides what would even be
+    indexed.
 - **⚠ Build order was reprioritised 2026-08-31: `site_gen` (Phase 9) is the PRIMARY product.**
   The ROADMAP was written when `ui_ux` review was the product, so its phase order put RAG (5
   milestones) and fine-tuning (6) — both of which only make *review* better — ahead of code
   generation. Neither is needed to generate a project from a prompt. **Critical path is now
-  `M4.1 → M4.2 → M5.1 → M5.2 → M9.1 → M9.2 → M9.3 → M9.4`** (8 milestones to a working product
-  instead of ~25). RAG, skills, fine-tuning, and hooks are **deferred, not cancelled**.
-  **Read ROADMAP's "Suggested execution order" block, not the phase numbers** — the numbers are
-  conceptual layering and deliberately do not match build order.
+  `M4.1 → M4.2 → M5.1 → M5.2 → M9.1 → M9.2 → M9.3 → M9.4 → M9.5`** (through iterative editing —
+  the product is not usable without it). Then `M3.1 → M9.6` adds skills and the ask-back turn.
+  Fine-tuning and hooks are **deferred, not cancelled**; **RAG waits on M6.1** answering what
+  would be indexed; **M8.3 sandboxing is off the path entirely** now that nothing is built
+  server-side. **Read ROADMAP's "Suggested execution order" block, not the phase numbers** — the
+  numbers are conceptual layering and deliberately do not match build order.
 - **Next up:** **M4.1 (token budgeter)** — first item on the critical path; M5.1/M5.2 both need it.
   **M9.1 (workspace primitive) and M9.2 (file tools) can be built in parallel at any time** — pure
   Python, no model, no loop, exactly like M2.1 and M2.4 needed nothing running.
@@ -90,10 +105,14 @@ rest of that list is either built or has a milestone.
   one system prompt + one user message + one model call. It has a 4-tool pack (M2.4) that
   **nothing calls yet** — no loop, no retrieval.
 - **Second domain scaffolded (dirs only, no code): `code_review`**.
-- **Third domain planned, not yet scaffolded: `site_gen`.** Generates a small project's worth of
-  real files from a prompt (e.g. "an e-commerce site in Nuxt.js") rather than reviewing an
-  existing one — a structurally different capability from `ui_ux`. Designed as ROADMAP Phase 9
-  (M9.1–M9.6); nothing under `app/domains/site_gen/` exists yet.
+- **Third domain planned, not yet scaffolded: `site_gen` — and it is the primary product.**
+  Generates a small project's worth of real files from a prompt ("build me an e-commerce site"),
+  then edits them on follow-up ("that button's colour is wrong"). Two output modes: plain
+  HTML/CSS/JS when no framework is named, otherwise files shaped for a **Sandpack** template
+  (falling back to `vite-react` for anything Sandpack cannot render, `nuxt` included).
+  **This service only writes files — the frontend renders the preview via Sandpack; nothing is
+  built or executed here.** Designed as ROADMAP Phase 9 (M9.1–M9.8); nothing under
+  `app/domains/site_gen/` exists yet.
 
 ### This service runs behind an existing Go API gateway
 
@@ -330,6 +349,16 @@ for its English-only exception).
   needs no sandbox"** — that was true before `fetch_docs` and is not true now.
 - Sub-agents: **last milestone (M8.4)**, after the loop is stable. Isolated rebuilt context,
   subset permissions, structured-summary returns — never an inherited parent transcript.
+- Preview for `site_gen`: **Sandpack in the user's browser** (MIT, no licence fee, no COEP/COOP
+  headers). WebContainer rejected — commercial licence + headers that could break the Next.js
+  frontend. **This service builds and runs nothing**, so ROADMAP M8.3 sandboxing is off the path.
+- `site_gen` statefulness: **none.** Workspace on disk keyed by `project_id`, conversation
+  `history` re-sent by the client each turn. M4.4 session store is not required.
+- Unsupported frameworks in `site_gen`: **fall back to `vite-react`** and say so in the response.
+  Sandpack has no `nuxt` template.
+- Skill content: **starts from OpenDesign's `SKILL.md` files** (Apache-2.0, no NOTICE — reuse
+  allowed with a licence copy, attribution, and a statement of changes). Select a handful, trim
+  each to ≤300 tokens; do not import all 533.
 
 **Known limitations of the current implementation:**
 

@@ -806,18 +806,51 @@ and do not spend dev time making it work on the 4B.
 that it comes last. See the execution-order block for the real sequence.
 
 A second, structurally different vertical alongside `ui_ux`: instead of reviewing an existing UI,
-`site_gen` writes a real small project — files on disk the user can browse — from a prompt like
-"give me an e-commerce site built with Nuxt.js". New domain, not a mode inside `ui_ux` (decided
+`site_gen` writes a real small project — files on disk the user can browse and preview — from a
+prompt like "build me an e-commerce site". New domain, not a mode inside `ui_ux` (decided
 2026-08-31): `ToolPolicy` is a flat per-domain allowlist with no per-mode scoping, `ui_ux` already
 sits at the measured ~3–5 tool cap, and this pack's write/path-taking tools are a different risk
 class than `ui_ux`'s read-mostly pack — mixing them would retroactively falsify CLAUDE.md's current
 claim that `ui_ux` needs no sandbox. See README's "Adding a domain" checklist; `app/core/` stays
 untouched per CLAUDE.md's invariant #4.
 
-**v1 is scoped to one loop run generating into an empty workspace.** Iteratively editing an
-existing project across multiple requests is an explicit non-goal for now — the file tree is
-re-discoverable per run via `list_directory`/`read_file`, so this does not need M4.4 (session
-store) as a dependency. Revisit only if real usage shows the non-goal was wrong.
+### The product shape (decided 2026-08-31)
+
+```
+User prompt
+  ↓
+[discovery] is there enough context?     ← a skill (M3.1) supplies the question checklist
+  ├─ no  → ask back, return the questions; the client re-sends history next turn
+  └─ yes → pick an output mode:
+       ├─ no framework named → self-contained HTML/CSS/JS
+       └─ framework named    → project files for a Sandpack template
+  ↓
+Files land in the workspace. The FRONTEND renders the preview, not this service.
+  ↓
+User: "that button's colour is wrong"
+  ↓
+Agent: list_directory → read_file → write_file  ← iterative editing, a first-class flow
+```
+
+**This service never builds or runs anything.** No `npm install`, no dev server, no container.
+Preview is the frontend's job via **Sandpack** (CodeSandbox, MIT — no licence fee, and it does not
+need the `Cross-Origin-Embedder-Policy` / `Cross-Origin-Opener-Policy` headers that StackBlitz's
+WebContainer requires, which would otherwise risk breaking the Next.js frontend's third-party
+images, fonts, and analytics). That decision removes M8.3 (sandboxing) from this phase's path
+entirely — see "Decisions settled".
+
+**Sandpack compatibility is an output contract on the agent, not just a frontend detail.**
+Generated files must match a Sandpack template's expected shape (entry point, `package.json`
+dependencies). Verified template list at time of writing: `static`, `vanilla(-ts)`, `react(-ts)`,
+`vue(-ts)`, `svelte`, `solid`, `angular`, `astro`, `nextjs`, `node`, and the `vite-*` variants.
+**`nuxt` is NOT among them** — so **any framework Sandpack cannot render falls back to
+`vite-react`** (decided 2026-08-31), which is the popular default and always renderable. The
+fallback must be stated in the response so the user knows they did not get what they asked for.
+
+**Iterative editing is a first-class v1 flow, not a later addition.** "Fix that button's colour"
+means `list_directory` → `read_file` → `write_file` against an existing workspace. This still
+needs no M4.4 session store: the workspace lives on disk keyed by `project_id`, and conversation
+history is re-sent by the client each turn (see M9.3), so this service stays stateless.
 
 **Ambition is profile-split, not gated all-or-nothing.** Whether `qwen3:4b` can coherently
 sequence a multi-file generation is unmeasured and must be measured (M9.4), not assumed to fail —
@@ -847,11 +880,15 @@ unit-testable today, the same way M2.1's `Tool`/`ToolRegistry` were.
 Three `Tool` subclasses under `app/domains/site_gen/tools/`: `write_file(path, content)`
 (`read_only=False`), `read_file(path)`, `list_directory(path)` (`read_only=True`). Every path
 argument routes through `Workspace.resolve()` before touching the filesystem — no tool constructs
-a `Path` directly. Flat ≤3-param `args_schema` per the M2.1 [4B gap] convention. Deliberately NOT
-`edit_file`/`delete_file`/`move_file` in v1 — YAGNI; each adds real risk/complexity (diff format,
-accidental self-deletion, dual-path safety) beyond what "generate a new project from scratch"
-needs. Schema-shape regression tests mirroring `tests/test_ui_ux_tools.py` (≤3 params, no nested
-objects).
+a `Path` directly. Flat ≤3-param `args_schema` per the M2.1 [4B gap] convention. Schema-shape
+regression tests mirroring `tests/test_ui_ux_tools.py` (≤3 params, no nested objects).
+
+**These same three tools cover editing, not just generation** — "fix that button's colour" is
+`list_directory` → `read_file` → `write_file` with the corrected content. Still deliberately NOT
+shipping `edit_file`/`delete_file`/`move_file`: a diff/patch format is one more thing for the 4B
+to get wrong, and read-then-rewrite is strictly simpler. Revisit only if measured token cost on
+large files makes whole-file rewriting impractical — which is plausible, but unproven, and the
+first components generated will be small.
 **Depends on:** M9.1, M2.1 (`Tool` ABC), M2.3 (`ToolExecutor` — identical execution path to
 `ui_ux`'s pack, no new mechanism needed). Unit-testable now, no loop required — same pattern as
 M2.4.
@@ -862,12 +899,23 @@ must include adversarial prompts attempting `../../`-style escapes, run through 
 
 ### M9.3 — New domain scaffold: `site_gen`
 `app/domains/site_gen/` (`agent.py`, `prompts.py`), one line in `AGENT_REGISTRY`, one router
-(`POST /site-gen/generate`) — the README's 3-step checklist, `app/core/` untouched. `AgentInput`
-gains an optional `project_id: str | None` (distinct from the still-dead `session_id`); when
-omitted, M9.1 mints one and it's echoed back on a new `AgentOutput.project_id`. Scaffolding only —
-no model call wired yet, matching how M1.1's profile scaffolding preceded any real consumer.
+(`POST /site-gen/generate`) — the README's 3-step checklist, `app/core/` untouched.
+
+`AgentInput` gains two optional fields, both driven by decisions above:
+- `project_id: str | None` — which workspace to write into. Omitted on the first turn; M9.1 mints
+  one and it comes back on a new `AgentOutput.project_id`. Distinct from the still-dead
+  `session_id`.
+- `history: list[dict] | None` — prior turns, **re-sent by the client each request**. This is what
+  makes both the discovery loop (M9.6) and iterative editing work **without** a server-side
+  session store (M4.4). Chosen deliberately: it keeps this service stateless, which is what
+  CLAUDE.md §1 assumes, and matches how OpenDesign's own BYOK path builds its message list from
+  client-supplied messages.
+
+Scaffolding only — no model call wired yet, matching how M1.1's profile scaffolding preceded any
+real consumer.
 **Depends on:** M1.3 (registry pattern), M9.2 (the tools it will eventually hold).
-**[4B gap]** None yet.
+**[4B gap]** None yet. Note for M9.4: `history` grows every turn and competes with tool results
+for the 4B's window — M4.1's budgeter owns that trade, not this schema.
 
 ### M9.4 — Wire into the loop: generate a new project (dev-tier, scaled ambition)
 Once M5.2 lands, `SiteGenAgent.handle` builds a `ToolRegistry` from M9.2's 3 tools and a
@@ -885,7 +933,42 @@ longer runs.
 sequence a multi-file generation is unmeasured. Both a "yes, trivial scaffold works" and a "no, it
 loses coherence past 2 calls" result are acceptable, measured outcomes — not failure states.
 
-### M9.5 — Large-tier generation ambition (prod-only stretch)
+### M9.5 — Iterative editing of an existing workspace
+The "fix that button's colour" flow, and the reason `read_file`/`list_directory` exist at all.
+The agent is given an existing `project_id` plus the client's `history`, and must *rediscover*
+what is already there rather than assume it — `list_directory` to find the component,
+`read_file` to see the current colour, `write_file` with the corrected content.
+
+Two things this milestone must actually prove, not assume:
+1. **The model edits rather than regenerates.** A small model's failure mode here is rewriting the
+   whole project from scratch on every follow-up, silently discarding earlier work. Measure it.
+2. **The workspace is the source of truth, not the history.** If `history` and the files disagree
+   (user edited a file themselves, or an earlier write partially failed), the files win.
+**Depends on:** M9.4, M9.3 (`history` on `AgentInput`). No M4.4 — the workspace on disk plus
+client-sent history is the whole state model.
+**[4B gap]** Whole-file rewriting costs input tokens on read and output tokens on write, for the
+same file. On a 32K window with several hundred tokens burned on reasoning, this caps how large an
+editable file can be — measure the ceiling instead of guessing it, and let that number decide
+whether `edit_file` (M9.2's deferred tool) ever becomes necessary.
+
+### M9.6 — Discovery: ask before generating
+When the prompt is under-specified ("build me an e-commerce site"), the agent should ask back
+instead of inventing an answer: which framework, what visual style, what pages. The question set
+comes from a **skill** (M3.1) — a checklist is exactly what Phase 3 defines a skill to be — not
+from the model's improvisation, and not from RAG.
+
+The turn ends by *returning the questions*; the client re-sends `history` with the user's answers
+on the next request (M9.3). No server-side session state.
+
+Note the interaction with the `vite-react` fallback: because an unsupported framework degrades to
+a renderable default rather than failing, asking about the framework is an *improvement*, not a
+precondition. Ask about style and scope, where there is no sensible default.
+**Depends on:** M9.4, M3.1 (the skill mechanism), M9.3 (`history`).
+**[4B gap]** A question-asking turn is a *terminal state that is not an answer* — M5.2's loop must
+treat it as success, the same way it already treats `NoToolCall`. Do not let it look like a
+failed run. Also cap the question count: the 4B will happily ask eight questions where two matter.
+
+### M9.7 — Large-tier generation ambition (prod-only stretch)
 Extends generation ambition for `reliability_tier == "large"` to real multi-page/multi-component
 output, likely via M5.4's planner strategy (plan the file list, then execute writes) rather than
 raw ReAct — laying out an unfamiliar multi-file structure resembles M5.4's "multi-part audit"
@@ -897,7 +980,7 @@ readiness. Same distinction already used for the missing RAG embedding model und
 **[4B gap]** Not applicable — large-only by definition; do not attempt on the 4B (same phrasing as
 M5.4).
 
-### M9.6 — Reflect this pack in M8.2 / M8.3 (docs-only)
+### M9.8 — Reflect this pack in M8.2 / M8.3 (docs-only)
 Add `write_file`/`read_file`/`list_directory` to M8.2's future capability declarations
 (`{"fs_write"}` / `{"fs_read"}` / `{"fs_read"}`) — pre-specified the same way `fetch_docs`'s
 `{"network"}` was written before M8.2 existed. Update M8.3 triggers #2 and #4 to name this pack as
@@ -924,15 +1007,26 @@ DONE
                                            M1.5's JSONL persistence deferred to M7.2)
 [x] M2.1 → M2.2 → M2.3 → M2.4            (tools. Tool-call format frozen — the loop's hard gate)
 
-CRITICAL PATH — the shortest route to "type a prompt, get generated files"
+CRITICAL PATH — the shortest route to "type a prompt, get generated files, see them rendered"
     M4.1 → M4.2                          (budgeter, then assembly — M5.1/M5.2 need both)
     M5.1 → M5.2                          (loop. M5.2 is where the Phase 2 tool layer is finally
                                            used by anything at all)
     M9.1 → M9.2 → M9.3 → M9.4            (workspace → file tools → domain → wire into the loop)
+    M9.5                                 (iterative editing — "fix that button's colour". Needed
+                                           for the product to be usable, not a later nicety)
+
+THEN — makes it good rather than merely working
+    M3.1 → M9.6                          (skill mechanism, then the discovery/ask-back turn.
+                                           Skill CONTENT starts from OpenDesign's design-pattern
+                                           SKILL.md files — Apache-2.0, attribution required)
+    M3.2                                 (rule-based skill selection, once there are several)
 
 PARALLEL — no model, no loop, no dependency on the critical path
     M9.1, M9.2                           (pure Python + unit tests; build these if Phase 4 stalls)
-    M6.1                                 (corpus definition is writing, not code)
+    M6.1                                 (corpus definition is writing, not code — and it is the
+                                           milestone that answers "what would RAG even index?",
+                                           which is currently unknown. Until it has an answer,
+                                           M6.2-M6.4 must not start)
 
 ADD WHEN MEASURED, NOT BEFORE
     M4.3                                 (compaction. NOT a hard dependency of M5.2 — M2.3 already
@@ -942,15 +1036,23 @@ ADD WHEN MEASURED, NOT BEFORE
     M5.3                                 (per-profile loop policy — needs two profiles worth
                                            caring about; today only the 4B actually runs)
 
-DEFERRED — serve the reviewer product, not the generator. Not cancelled, just not next.
-    M6.2 → M6.3 → M6.4 → M6.5            (RAG — grounds ui_ux review in real WCAG text)
-    M3.1 → M3.2 → M3.3                   (skills)
+DEFERRED — not cancelled, just not next.
+    M6.2 → M6.3 → M6.4 → M6.5            (RAG — blocked on M6.1 having an answer first)
+    M3.3                                 (tool packs)
     M7.1 → ... → M7.6                    (fine-tuning)
-    M8.1 → M8.2 → [M8.3 if triggered]    (hooks, permissions, sandbox)
-    M4.4                                 (session store — Phase 9 v1 explicitly does not need it)
+    M8.1 → M8.2                          (hooks, permission layer)
+    M4.4                                 (session store — NOT needed: the workspace is on disk and
+                                           the client re-sends history, so this service stays
+                                           stateless through both discovery and editing)
+
+NO LONGER ON ANY PATH
+    M8.3                                 (sandboxing. This service never builds or runs generated
+                                           code — Sandpack renders it in the user's browser — so
+                                           trigger #1 never fires. Path traversal, trigger #2, is
+                                           handled by M9.1's workspace guard)
 
 BLOCKED ON INFRASTRUCTURE, NOT ENGINEERING
-    M9.5, M5.4, M8.4                     (all need qwen3.8-27b, which is not running anywhere)
+    M9.7, M5.4, M8.4                     (all need qwen3.8-27b, which is not running anywhere)
     M6.3                                 (needs an embedding model this runner does not have)
 ```
 
@@ -996,6 +1098,33 @@ build those.
   review remains a real domain and those milestones still describe how to make it good.
   **Do not re-derive this ordering from phase numbers** — the numbers reflect conceptual layering,
   the execution-order block reflects what to build next.
+- **Preview is Sandpack, in the user's browser — this service never builds or runs anything.**
+  No `npm install`, no dev server, no container, no GPU/CPU cost per preview. Sandpack (CodeSandbox)
+  is MIT and needs no cross-origin-isolation headers. StackBlitz's **WebContainer was rejected**:
+  it requires a **commercial licence for production**, and its mandatory
+  `Cross-Origin-Embedder-Policy: require-corp` + `Cross-Origin-Opener-Policy: same-origin` headers
+  risk breaking third-party images, fonts, and analytics on the Next.js frontend. Revisit only if
+  a framework Sandpack cannot render becomes a real requirement.
+- **Unsupported frameworks fall back to `vite-react`.** Sandpack has no `nuxt` template. Rather
+  than fail or half-support, generate the popular default and **say so in the response** — the user
+  must know they did not get what they asked for. Verified Sandpack templates: `static`,
+  `vanilla(-ts)`, `react(-ts)`, `vue(-ts)`, `svelte`, `solid`, `angular`, `astro`, `nextjs`,
+  `node`, `vite-*`.
+- **Two output modes:** no framework named → self-contained HTML/CSS/JS (renders in a bare
+  iframe, zero dependencies); framework named → project files shaped for a Sandpack template.
+- **Iterative editing is v1, not a later phase.** "Fix that button's colour" is the core loop, and
+  it needs no new tools beyond M9.2's three and no session store — the workspace on disk plus
+  client-re-sent `history` is the entire state model.
+- **Skill content starts from OpenDesign's `SKILL.md` files.** Verified **Apache-2.0, no NOTICE
+  file** — reuse and modification are permitted with a licence copy, attribution, and a statement
+  of changes. They ship 533 of them under `design-templates/`, and the frontmatter shape
+  (`name`/`description`/`triggers` + body) matches M3.1's design almost exactly. **Do not import
+  all 533** — M3.2's cap is 1–2 skills for the `small` tier; select a handful and trim each to
+  ≤300 tokens.
+- **RAG waits until M6.1 has an answer.** What to index is currently unknown, and M6.1 is exactly
+  the milestone that decides it. Building retrieval before knowing the corpus would be guessing
+  twice. Skills may cover enough of the "what style, what pattern" need that RAG is less urgent
+  than first assumed.
 - **The eventual "run on the user's machine like Claude Code" direction will break CLAUDE.md §1.**
   That section's load-bearing claim is that this service sits behind a Go gateway and is not
   publicly reachable, which is what justifies having no auth, no rate limiting, and no CORS here.
