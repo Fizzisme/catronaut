@@ -383,11 +383,70 @@ successes and denials land in `run.tool_results`.
 result can consume the 4B's entire remaining window. The 2000-char default is a placeholder —
 M4.1's token budgeter is the real owner of this number once it exists.
 
-### M2.4 — First real tool pack for `ui_ux`
-Concrete, small, useful. Suggested starting set: a contrast/a11y checker, a design-token/heuristic
-lookup (later backed by RAG in M6.4), and a structured-report formatter.
-**Depends on:** M2.3 (done — this milestone is unblocked), and benefits from M6.4 for the lookup
-tool.
+### [x] M2.4 — First real tool pack for `ui_ux` — DONE (2026-08-31)
+
+Shipped four tools under [app/domains/ui_ux/tools/](../app/domains/ui_ux/tools/), exported as
+`TOOLS` (a ready-made list for `ToolRegistry(TOOLS)` once M5.1/M5.2 wires it into an agent — still
+nothing does):
+
+- **`check_contrast(foreground, background)`** — [accessibility.py](../app/domains/ui_ux/tools/accessibility.py).
+  A real WCAG relative-luminance/contrast-ratio implementation (not a stub), returning
+  PASS/FAIL for AA normal, AA large, and AAA. Hex format is validated in `ContrastArgs` via a
+  `field_validator`, not inside `run()` — a malformed hex string is an M2.2 validation failure
+  (eligible for the one repair turn), not a runtime tool error routed through M2.3's
+  caught-exception path.
+- **`lookup_heuristic(topic)`** — [heuristics.py](../app/domains/ui_ux/tools/heuristics.py). Static
+  lookup over Jakob Nielsen's 10 usability heuristics (public domain knowledge, summarized in our
+  own words). `topic` is a `Literal` of 10 fixed values — an enum, not free text, per the M2.1
+  [4B gap] note. **Deliberately a placeholder**: M6.4 (RAG) replaces this file outright, not
+  extends it.
+- **`format_review(summary, issues, recommendations)`** — [report.py](../app/domains/ui_ux/tools/report.py).
+  Three flat params (the [4B gap] cap), `issues`/`recommendations` are plain string arrays, not
+  nested objects. Formats into a Markdown report with only the sections that have content.
+- **`fetch_docs(url)`** — [web.py](../app/domains/ui_ux/tools/web.py). **Added beyond the original
+  suggested set**, at the user's request, to let the agent pull in external reference material.
+  This is the one tool in the pack that makes an outbound request — see the M8.2 update below for
+  why that changes this pack's security assessment, and what mitigates it.
+
+**Schema-shape regression tests, not just behavior tests**: `tests/test_ui_ux_tools.py` asserts
+every tool in the pack has ≤3 params and no nested-object parameter — turning the M2.1 [4B gap]
+convention into something CI actually enforces, not just a comment anyone could drift from.
+
+**`fetch_docs`'s SSRF mitigation** (mirrors OpenDesign's `assertAndFetchExternalAsset` pattern —
+see the chat history around 2026-08-31 for that read-through): `_assert_fetchable_url` resolves
+the hostname via `socket.getaddrinfo` and rejects the request if **any** resolved address is
+loopback, private, link-local (covers the `169.254.169.254` cloud-metadata address specifically),
+reserved, multicast, or unspecified — checked *before* the request is made, so a hostname
+resolving to an internal address never reaches `httpx`. Redirects are never followed
+(`follow_redirects=False`); a 3xx is treated as a failure rather than silently chased somewhere
+the guard didn't check. Download is capped at 200KB, output at 4000 chars (on top of, not instead
+of, M2.3's generic 2000-char truncation). HTML→text uses stdlib `html.parser` — no new dependency
+for one tool. 10 tests cover the guard directly (DNS-mocked, no real network) plus one test that
+runs a blocked address through the *full* M2.3 `ToolExecutor` to confirm SSRF rejection surfaces
+as a clean failed result, not a crash.
+
+**Live-verified**, not just stubbed: `scripts/ui_ux_tool_pack_check.py` registers all four tools
+together and runs four prompts against real `qwen3:4b`, including one real fetch of
+`http://example.com/` (IANA's RFC 2606 documentation domain — safe to depend on in a script).
+This is also the measurement M2.2 flagged as missing: tool-selection accuracy had only been
+checked with **one** tool registered.
+
+| Prompt | Expected | Got | Latency / tokens |
+|---|---|---|---|
+| contrast question | `check_contrast` | `check_contrast`, correct args | 43.1s / 357 |
+| heuristic question | `lookup_heuristic` | `lookup_heuristic(topic=error_prevention)` | 13.8s / 324 |
+| "fetch example.com" | `fetch_docs` | `fetch_docs(url=http://example.com/)` | 13.8s / 334 |
+| no-tool question | no call | answered directly, no invented call | 24.2s / 563 |
+
+**4/4 — the 4B picked the right tool (or correctly picked none) with 4 tools registered
+simultaneously.** Closes the gap M2.2 flagged: selection accuracy was only verified with one
+tool. Still worth treating as one data point, not a guarantee — CLAUDE.md's measured spread on
+timing (37.3s vs 79.0s for the same scenario in M2.2) applies to selection too; re-verify before
+scaling past the ~3–5 tool cap the [4B gap] convention assumes.
+
+**Depends on:** M2.3. ✅
+**[4B gap]** Confirms the M2.1 conventions (flat args, ≤3 params, enums, snake_case verb-noun
+names) were worth encoding as tests, not just comments — see the schema-shape tests above.
 
 ---
 
@@ -661,10 +720,29 @@ computation). Each domain declares what it permits. Enforcement happens in exact
 layer governs what the *model* may invoke inside a run, which the gateway cannot see. Different
 concern — do not delete this citing §1.
 
-**Assessment of M2.4's tool pack (2026-08-31):** contrast/a11y checker = pure computation on args;
-design-token lookup = read-only, in-process, query-string arg (**never a path**); report formatter
-= pure string work. None executes code, resolves a path, or makes an outbound request →
-**declaration plus allowlist is sufficient; no sandbox is needed for that pack.**
+**Assessment of M2.4's tool pack — revised 2026-08-31, after `fetch_docs` was added.** The
+original assessment (below, struck through in spirit not in text) held for three of the four
+tools and no longer holds for the pack as a whole:
+
+- `check_contrast`, `lookup_heuristic`, `format_review`: pure computation / in-process lookup /
+  string formatting. None executes code, resolves a path, or makes an outbound request.
+- `fetch_docs`: **does** make an outbound request to a model-supplied URL — this is exactly
+  M8.3's trigger #3. It was added anyway (user request, 2026-08-31) because the alternative —
+  building the full M8.2 permission layer and possibly M8.3 sandboxing just to unblock one tool —
+  was judged worse than shipping a scoped, tool-local mitigation now and formalizing it when M8.2
+  actually lands. That mitigation (SSRF guard: DNS-resolved address allowlist, no redirects
+  followed, size caps — see M2.4's writeup) is defense-in-depth at the point of use, not a
+  substitute for M8.2's single `pre_tool_call` enforcement point or `capabilities` declaration.
+  **When M8.2 lands, `fetch_docs` should declare `capabilities={"network"}`, and the SSRF guard
+  should stay** — M8.2 controls *whether* a domain may use a network tool at all; the guard
+  controls *what* that tool is allowed to reach once permitted. They are complementary, not
+  redundant.
+
+**Revised conclusion: declaration plus allowlist is sufficient for 3 of 4 tools; `fetch_docs` is
+the pack's one exception, currently covered by a narrower, tool-local mitigation instead of the
+general M8.2 layer.** This does not retroactively require building M8.2 early — M8.3's ordering
+rule (don't sandbox before a trigger fires) still applies, and an SSRF guard is not the same
+category of risk as arbitrary code execution.
 **Depends on:** M2.3, M8.1.
 
 ### M8.3 — Sandboxing — conditional; do not build until a trigger fires
@@ -772,6 +850,20 @@ M2.1 and M1.3, both done, and it is a self-contained registry. Useful if Phase 4
 - **Session persistence is scoped to conversation history only** (M4.4). Resuming an interrupted
   run — loop state, partial tool results — is covered nowhere; M7.2 logs runs for training, not for
   resume. Decide whether that matters given a single call already takes 44s–600s.
+- **No path exists for a tool to return an image to the model mid-loop — a "view this UI visually"
+  tool is not buildable today, for three concrete reasons (raised 2026-08-31, deferred rather than
+  built):**
+  1. `qwen3:4b` has no vision (`ModelProfile.supports_vision=False`, measured). CLAUDE.md's
+     standing decision is vision stays optional until the real 27B runs on prod — a vision tool
+     can't be verified against the dev model at all, violating "verify against qwen3:4b first."
+  2. `ToolExecutionResult.output` (M2.3) is typed `str`. There is no design for a tool result
+     that carries an image back into the message list the way `AgentInput.image_base64` does at
+     the *start* of a conversation — this is a real architecture gap, not a missing tool.
+  3. Screenshotting a live UI needs a headless browser (Playwright or similar) — a new, heavy
+     dependency class this service does not otherwise need.
+  **Do not build this speculatively.** If it becomes a real requirement: design the multimodal
+  tool-result path first (as its own milestone, likely adjacent to M8.x), gate the tool behind
+  `model_profile.supports_vision`, and verify on the 27B — not on `qwen3:4b`, which cannot run it.
 
 ---
 

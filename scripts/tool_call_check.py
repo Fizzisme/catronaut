@@ -12,6 +12,11 @@ model declined to call the tool — that is a model/prompt problem, not a parser
 
 import asyncio
 import sys
+from pathlib import Path
+
+# `python scripts/tool_call_check.py` puts this file's own directory on sys.path,
+# not the repo root — without this, `import app` fails regardless of cwd.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pydantic import BaseModel
 

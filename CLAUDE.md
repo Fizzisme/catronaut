@@ -5,8 +5,8 @@
 ## STATUS (update this block whenever work lands)
 
 - **Last synced with code:** 2026-08-31
-- **Branch:** `feat/tool-execution-policy` (off `develop`). M2.1, M2.2, and the phase restructure
-  are all merged to `develop` (PRs #7, #8, #9).
+- **Branch:** `feat/ui-ux-tool-pack` (off `develop`). M2.1–M2.3 and the phase restructure are all
+  merged to `develop` (PRs #7–#10).
 - **⚠ ROADMAP phases were restructured on 2026-08-31 — milestone numbers moved.** Phase 1 was
   renamed **Runtime** (it is scaffolding, not the agent harness), a new **Phase 3 — Skills** was
   inserted, and the old Phases 3–6 became **4–7**, plus a new **Phase 8 — Extensibility and
@@ -18,11 +18,12 @@
   via PR #4 and PR #6. M1.2 = no retry, by decision; M1.5's JSONL persistence deferred to M7.2, by
   decision — both documented in §6, not loose ends. The service boots and answers with a real
   `qwen3:4b`, with per-run token/latency metrics in the logs.
-- **Phase 2 (Tools) is now fully done: M2.1, M2.2, and M2.3 all shipped.** `Tool`/`ToolRegistry`
-  (M2.1), `parsing.py`/`resolver.py` (M2.2, the tool-call envelope is frozen), and
-  `policy.py`/`executor.py` (M2.3, on `feat/tool-execution-policy`, not yet merged). 52 tests pass.
-  **Nothing calls any of this yet** — `ToolCallResolver` and `ToolExecutor` exist and are tested
-  in isolation, but wiring them into an agent is the loop's job (M5.1/M5.2).
+- **Phase 2 (Tools) is fully done, M2.1 through M2.4 — the whole tool layer through a real tool
+  pack.** `Tool`/`ToolRegistry` (M2.1), `parsing.py`/`resolver.py` (M2.2, envelope frozen),
+  `policy.py`/`executor.py` (M2.3), and now `app/domains/ui_ux/tools/` — 4 concrete tools:
+  `check_contrast`, `lookup_heuristic`, `format_review`, `fetch_docs` (M2.4, on
+  `feat/ui-ux-tool-pack`, not yet merged). 78 tests pass. **Nothing calls any of this yet** —
+  wiring the tool layer into an agent is the loop's job (M5.1/M5.2).
 - **⚠ `qwen3:4b` DOES support native tool calling — measured 2026-08-31, and the profile was
   wrong.** Ollama reports `capabilities: ['completion','tools','thinking']`; a real call returned
   a well-formed `message.tool_calls` (37.3s, 510 tokens). `ModelProfile` now says
@@ -30,9 +31,23 @@
   was a guess from M1.1, made while nothing consumed the field. **Do not restore it.** The prompt
   envelope path is implemented and tested too — it is the fallback for models without the `tools`
   capability, not the 4B's only option.
-- **Next up:** M2.4 (first real tool pack for `ui_ux`) — everything it depends on now exists,
-  though the ROADMAP suggests landing it after M6.4 so the design-token lookup can be RAG-backed
-  instead of hardcoded. M3.1 (skill loading) can also be picked up out of order.
+- **`fetch_docs` is the pack's one network tool** — added beyond the ROADMAP's original suggested
+  set, at the user's request. It makes an outbound HTTP GET, which is exactly ROADMAP M8.3's
+  trigger #3. Mitigated with a tool-local SSRF guard (DNS-resolved address allowlist, no
+  redirects followed) rather than building the full M8.2 permission layer early — see M2.4's and
+  M8.2's ROADMAP writeups for why that's the right call for now, not a shortcut taken silently.
+- **Live-verified with all 4 tools registered together: 4/4 correct tool selection** (measured
+  2026-08-31, `scripts/ui_ux_tool_pack_check.py`). Closes the gap M2.2 left open — selection
+  accuracy had only been checked with one tool. Still one data point; re-verify before adding
+  tools past the ~3–5 [4B gap] cap.
+- **A "view this UI via vision" tool was requested and explicitly NOT built** — three concrete
+  blockers recorded in ROADMAP "Still open": `qwen3:4b` has no vision, `ToolExecutionResult` is
+  typed `str` with no multimodal path back into the message list, and screenshotting needs a
+  headless browser this service doesn't otherwise depend on. Don't build it speculatively; see
+  the ROADMAP entry for what would need to exist first.
+- **Next up:** M3.1 (skill loading) is the next milestone that doesn't need anything else to
+  start — Phase 2 is done. M4.1 (token budgeter) is the next item in the ROADMAP's suggested
+  build order.
 - **Do not redo Phase 0 or Phase 1.** The missing `config.py`, missing `model_provider/`, UTF-16
   `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**. `ModelProfile`,
   `RunContext`, usage metrics all exist — don't re-derive them.
@@ -193,7 +208,12 @@ app/
 │   ├── registry.py             AGENT_REGISTRY — the one place a domain is declared
 │   └── ui_ux/
 │       ├── agent.py            creates a RunContext, builds [system, user(+images)], chat()
-│       └── prompts.py          SYSTEM_PROMPT constant
+│       ├── prompts.py          SYSTEM_PROMPT constant
+│       └── tools/               (M2.4) TOOLS = 4 concrete Tool instances, not wired in yet
+│           ├── accessibility.py check_contrast — real WCAG contrast ratio
+│           ├── heuristics.py    lookup_heuristic — Nielsen's 10, static, enum topic
+│           ├── report.py        format_review — 3 flat params -> Markdown report
+│           └── web.py           fetch_docs — the pack's one network tool; SSRF guard
 └── schemas/
     └── agent.py                AgentInput{prompt, image_base64?},
                                  AgentOutput{run_id, result, model, raw?}
@@ -202,9 +222,11 @@ app/
 Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `models/base`, `models/adapters/{ui_ux,code_review}`, `data/{raw,processed,vectorstore}`,
 `evaluation/{datasets/{ui_ux,code_review},results,scripts}`, `configs/`,
-`scripts/smoke_test.py` + `scripts/tool_call_check.py` (live M2.2 check, not in pytest),
+`scripts/smoke_test.py` + `scripts/tool_call_check.py` (live M2.2 check) +
+`scripts/ui_ux_tool_pack_check.py` (live M2.4 check, all 4 tools + 1 real fetch; none in pytest),
 `tests/test_api.py` (17) + `tests/test_tools.py` (5) + `tests/test_tool_parsing.py` (22) +
-`tests/test_tool_execution.py` (8), `docs/FLOW.md` (see §5 for its English-only exception).
+`tests/test_tool_execution.py` (8) + `tests/test_ui_ux_tools.py` (26), `docs/FLOW.md` (see §5
+for its English-only exception).
 
 ## 5. Conventions — follow these
 
@@ -286,11 +308,11 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
    multi-minute worst-case latency on top of the 44s–600s a single call already takes. Do not
    re-add this without a reason that outweighs that.
 2. **No loop, no RAG, no context budgeting, no session/history, and no agent uses the tool
-   layer.** `UIUXAgent` is still single-shot and stateless. The entire tool layer — `Tool` /
-   `ToolRegistry` (M2.1), parsing/repair (M2.2), and now allowlist/timeout/truncation (M2.3) —
-   exists and is tested in isolation, but **nothing calls it**: no concrete tools (M2.4), not
-   wired into `Agent`/`Orchestrator`. Wiring belongs to the loop (M5.1/M5.2); doing it earlier
-   means building a mini-loop in `UIUXAgent` and deleting it later.
+   layer.** `UIUXAgent` is still single-shot and stateless. The entire tool layer is now done —
+   `Tool`/`ToolRegistry` (M2.1), parsing/repair (M2.2), allowlist/timeout/truncation (M2.3), and
+   4 real `ui_ux` tools (M2.4) — and tested, including live against `qwen3:4b`, but **nothing
+   calls it**: not wired into `Agent`/`Orchestrator`. Wiring belongs to the loop (M5.1/M5.2);
+   doing it earlier means building a mini-loop in `UIUXAgent` and deleting it later.
 3. **No skills, no lifecycle hooks, no permission layer, no sub-agents.** Added to the ROADMAP on
    2026-08-31 after a taxonomy audit, none of them built: skills are Phase 3 (M3.1–M3.3), and
    hooks / permissions / sandbox-if-triggered / sub-agents are Phase 8 (M8.1–M8.4). Behavior that
