@@ -57,9 +57,17 @@
   large-only gate would make this phase permanently undone by this project's own rule. Mechanics
   (workspace, path-sandboxed file tools) are measurable on `qwen3:4b` now; only the *ambition*
   (a full multi-page site) is large-tier, split out as M9.5 and marked BLOCKED on GPU-server infra.
-- **Next up:** M3.1 (skill loading) is the next milestone that doesn't need anything else to
-  start — Phase 2 is done. M4.1 (token budgeter) is the next item in the ROADMAP's suggested
-  build order. M9.1 (workspace primitive) can also start any time — no model, no loop needed.
+- **⚠ Build order was reprioritised 2026-08-31: `site_gen` (Phase 9) is the PRIMARY product.**
+  The ROADMAP was written when `ui_ux` review was the product, so its phase order put RAG (5
+  milestones) and fine-tuning (6) — both of which only make *review* better — ahead of code
+  generation. Neither is needed to generate a project from a prompt. **Critical path is now
+  `M4.1 → M4.2 → M5.1 → M5.2 → M9.1 → M9.2 → M9.3 → M9.4`** (8 milestones to a working product
+  instead of ~25). RAG, skills, fine-tuning, and hooks are **deferred, not cancelled**.
+  **Read ROADMAP's "Suggested execution order" block, not the phase numbers** — the numbers are
+  conceptual layering and deliberately do not match build order.
+- **Next up:** **M4.1 (token budgeter)** — first item on the critical path; M5.1/M5.2 both need it.
+  **M9.1 (workspace primitive) and M9.2 (file tools) can be built in parallel at any time** — pure
+  Python, no model, no loop, exactly like M2.1 and M2.4 needed nothing running.
 - **Do not redo Phase 0 or Phase 1.** The missing `config.py`, missing `model_provider/`, UTF-16
   `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**. `ModelProfile`,
   `RunContext`, usage metrics all exist — don't re-derive them.

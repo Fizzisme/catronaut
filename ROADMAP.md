@@ -1,8 +1,14 @@
 # ROADMAP.md — Catronaut agent system
 
 Implementation roadmap for the remaining core pieces: **Runtime, Tools, Skills, Context, Loop,
-RAG, Fine-tuning, Extensibility**. Milestones are sequential and numbered; dependencies are stated
-per milestone.
+RAG, Fine-tuning, Extensibility, Code generation**. Milestones are numbered by conceptual layer;
+**the order to build them in is the "Suggested execution order" block near the bottom**, which
+diverges from the numbering on purpose.
+
+**The primary product is Phase 9 (`site_gen`)** — a user describes a project and gets real
+generated files back. `ui_ux` (review) came first historically and stays a supported domain, but
+the build order is optimised for reaching a working generator, not a polished reviewer. See
+"Decisions settled" for why, and what that defers.
 
 Read [CLAUDE.md](CLAUDE.md) first — it records current state and conventions.
 
@@ -793,7 +799,11 @@ and do not spend dev time making it work on the 4B.
 
 ---
 
-## Phase 9 — Code generation workspace (`site_gen`)
+## Phase 9 — Code generation workspace (`site_gen`) — THE PRIMARY PRODUCT
+
+**Numbered last, built next.** This phase is the product the project is actually for
+(decided 2026-08-31); the high number reflects that it was designed after Phases 0–8 existed, not
+that it comes last. See the execution-order block for the real sequence.
 
 A second, structurally different vertical alongside `ui_ux`: instead of reviewing an existing UI,
 `site_gen` writes a real small project — files on disk the user can browse — from a prompt like
@@ -902,26 +912,46 @@ guard, not a new precedent. Correct trigger #4's wording if `workspace_root` end
 
 ## Suggested execution order
 
-**Phase numbers are conceptual; this block is the build order.** Phase 3 (Skills) is the one place
-they diverge — see the note under "Dependency overview".
+**Phase numbers are conceptual; this block is the build order, and the two diverge on purpose.**
+Reprioritised 2026-08-31 (see "Decisions settled" below): **`site_gen` — generating a real project
+from a prompt — is the primary product**, so the build order is now the shortest path to a working
+generation run, not the shortest path to a polished reviewer.
 
 ```
-[x] M0.1 → M0.2 → M0.3 → M0.4 → M0.5   (service boots — DONE)
-[x] M1.1 → M1.2 → M1.3 → M1.4 → M1.5    (Phase 1: runtime — DONE. M1.2 retry skipped by decision;
-                                          M1.5's JSONL persistence deferred to M7.2 by decision)
-[x] M2.1 → M2.2 → M2.3 → M2.4            (Phase 2: tools — ALL FOUR DONE. Tool-call format frozen,
-                                          the hard gate for the loop, is satisfied)
-    M4.1 → M4.2 → M4.3 → M4.4           (context budget)
-    M5.1 → M5.2 → M5.3                  (loop; M5.4 optional, prod only)
-    M6.1 → M6.2 → M6.3 → M6.4 → M6.5    (RAG)  [M6.1 can start early, in parallel]
-    M3.1 → M3.2                         (skills; M3.2 needs M4.1 + M4.2, so after Phase 4)
-    M3.3 lands after M2.4 (tool packs generalize from one real pack) — unblocked now
-    M7.1 → M7.2 → M7.3 → M7.4 → M7.5 → M7.6   (fine-tuning)
-    M8.1 → M8.2 → [M8.3 only if a trigger fires] → M8.4   (hooks, permissions, sub-agents LAST)
-    M9.1 → M9.2 → M9.3            (site_gen scaffold; independent of the loop, can start anytime)
-    M9.4                          (needs M5.2 — the loop)
-    M9.5                          (BLOCKED — needs the 27B actually running)
-    M9.6                          (docs-only, after M9.2)
+DONE
+[x] M0.1 → M0.2 → M0.3 → M0.4 → M0.5     (service boots)
+[x] M1.1 → M1.2 → M1.3 → M1.4 → M1.5     (runtime. M1.2 retry skipped by decision;
+                                           M1.5's JSONL persistence deferred to M7.2)
+[x] M2.1 → M2.2 → M2.3 → M2.4            (tools. Tool-call format frozen — the loop's hard gate)
+
+CRITICAL PATH — the shortest route to "type a prompt, get generated files"
+    M4.1 → M4.2                          (budgeter, then assembly — M5.1/M5.2 need both)
+    M5.1 → M5.2                          (loop. M5.2 is where the Phase 2 tool layer is finally
+                                           used by anything at all)
+    M9.1 → M9.2 → M9.3 → M9.4            (workspace → file tools → domain → wire into the loop)
+
+PARALLEL — no model, no loop, no dependency on the critical path
+    M9.1, M9.2                           (pure Python + unit tests; build these if Phase 4 stalls)
+    M6.1                                 (corpus definition is writing, not code)
+
+ADD WHEN MEASURED, NOT BEFORE
+    M4.3                                 (compaction. NOT a hard dependency of M5.2 — M2.3 already
+                                           caps each tool result at 2000 chars. Add it when a real
+                                           multi-file run is measured blowing the window, which is
+                                           likely but unproven)
+    M5.3                                 (per-profile loop policy — needs two profiles worth
+                                           caring about; today only the 4B actually runs)
+
+DEFERRED — serve the reviewer product, not the generator. Not cancelled, just not next.
+    M6.2 → M6.3 → M6.4 → M6.5            (RAG — grounds ui_ux review in real WCAG text)
+    M3.1 → M3.2 → M3.3                   (skills)
+    M7.1 → ... → M7.6                    (fine-tuning)
+    M8.1 → M8.2 → [M8.3 if triggered]    (hooks, permissions, sandbox)
+    M4.4                                 (session store — Phase 9 v1 explicitly does not need it)
+
+BLOCKED ON INFRASTRUCTURE, NOT ENGINEERING
+    M9.5, M5.4, M8.4                     (all need qwen3.8-27b, which is not running anywhere)
+    M6.3                                 (needs an embedding model this runner does not have)
 ```
 
 **Phases 0–2 are fully done.** Next up is the critical path above: **M4.1 → M4.2 → M4.3 →
@@ -952,10 +982,25 @@ build those.
   Phase 8. Phase 1 was renamed Runtime, and Phases 3–6 were renumbered to 4–7 to open the slot.
   **The renumber touched no shipped code identifiers** — everything built so far lives in M0/M1/M2,
   which kept their numbers — so git history and commit messages remain accurate.
-- **No sandbox for the `ui_ux` tool pack.** See M8.2's assessment and M8.3's trigger list.
+- **No sandbox for the `ui_ux` tool pack** *except `fetch_docs`* — see M8.2's revised assessment
+  and M8.3's trigger list.
 - **Sub-agents are last (M8.4), not early.** Isolated rebuilt context, subset permissions, and
   structured-summary returns are the constraints that make them expensive; the loop must be stable
   on one domain first.
+- **`site_gen` (Phase 9) is the primary product; the build order was reprioritised around it.**
+  This ROADMAP was originally written when `ui_ux` *review* was the product, so its build order put
+  RAG (5 milestones) and fine-tuning (6) — both of which exist to make **review** better — ahead of
+  Phase 9. Neither is needed to generate a project from a prompt. The critical path is now
+  `M4.1 → M4.2 → M5.1 → M5.2 → M9.1 → M9.2 → M9.3 → M9.4` (8 milestones instead of ~25 to a
+  working product). RAG, skills, fine-tuning, and hooks are **deferred, not cancelled** — `ui_ux`
+  review remains a real domain and those milestones still describe how to make it good.
+  **Do not re-derive this ordering from phase numbers** — the numbers reflect conceptual layering,
+  the execution-order block reflects what to build next.
+- **The eventual "run on the user's machine like Claude Code" direction will break CLAUDE.md §1.**
+  That section's load-bearing claim is that this service sits behind a Go gateway and is not
+  publicly reachable, which is what justifies having no auth, no rate limiting, and no CORS here.
+  A local-process deployment invalidates all three premises. Nothing to do now — Phase 9 v1 is
+  server-side — but whoever starts that pivot must revisit §1 first, not discover it midway.
 
 **Still open:**
 - An embedding model for RAG — `/api/embed` is unavailable on the current runner (needed by M6.3).
