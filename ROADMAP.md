@@ -6,10 +6,12 @@ per milestone.
 
 Read [CLAUDE.md](CLAUDE.md) first — it records current state and conventions.
 
-**Progress: Phase 0, Phase 1, and M2.1 are complete (2026-08-31).** The service boots, `/health`
-reports the model backend, `POST /ui-ux/analyze` answers with a real `qwen3:4b` response, and the
-`Tool`/`ToolRegistry` definition layer exists. Milestones are marked `[x]` as they land — keep this
-file updated so other sessions don't redo finished work.
+**Progress: Phases 0, 1, and 2 are complete (2026-08-31).** The service boots, `/health` reports
+the model backend, `POST /ui-ux/analyze` answers with a real `qwen3:4b` response, and the entire
+tool layer exists and is tested — definition/registry (M2.1), parsing/repair (M2.2), execution
+policy (M2.3), and a 4-tool `ui_ux` pack (M2.4). **Nothing calls the tool layer yet** — that is
+the loop's job (M5.2). Milestones are marked `[x]` as they land — keep this file updated so other
+sessions don't redo finished work.
 
 **Guiding constraints throughout:**
 
@@ -147,10 +149,15 @@ Phase 2. See the terminology note at the top of this file.
 Shipped [app/core/model_profile.py](../app/core/model_profile.py): a frozen `ModelProfile`
 dataclass (`name, context_window, supports_vision, supports_native_tools, tool_call_style
 [native|prompt|none], reliability_tier [small|large]`) plus `get_model_profile(model_name)`,
-keyed by exact Ollama tag. Registered: `qwen3:4b` and `qwen3:8b` (both `small`, no vision, no
-native tools, prompt-style tool calling), `qwen3.8-27b` (`large`, vision, native tools). An
-unregistered `model_name` falls back to a conservative default profile with a logged warning,
-instead of guessing or crashing.
+keyed by exact Ollama tag. An unregistered `model_name` falls back to a conservative default
+profile with a logged warning, instead of guessing or crashing.
+
+**⚠ The tool-calling values this milestone shipped for `qwen3:4b` were later measured and found
+wrong — see M2.2.** M1.1 registered `qwen3:4b` and `qwen3:8b` as "no native tools, prompt-style"
+purely as a guess, made while nothing consumed those fields. M2.2 measured the real model:
+`qwen3:4b` is `supports_native_tools=True`, `tool_call_style="native"`. `qwen3:8b` stays on the
+prompt path — same family, but never measured. `qwen3.8-27b` (`large`, vision, native tools) is
+unchanged and still unverified, since that tag isn't running anywhere yet.
 
 Wired in, not left dead:
 - `Settings.model_profile` — a property on `settings`, so `settings.model_name` is still the one
@@ -917,17 +924,16 @@ they diverge — see the note under "Dependency overview".
     M9.6                          (docs-only, after M9.2)
 ```
 
-**Phase 1 (Runtime) is fully done, and Phase 2 is done through M2.3 — definition, parsing, and
-execution policy all exist and are tested.** Next up: **M2.4 (the first real tool pack)** — it now
-has everything it depends on, though the ROADMAP suggests landing it after M6.4 so the
-design-token lookup tool can be RAG-backed instead of hardcoded.
+**Phases 0–2 are fully done.** Next up is the critical path above: **M4.1 → M4.2 → M4.3 →
+M5.1 → M5.2**, then Phase 9.
 
 Nothing calls `ToolCallResolver` or `ToolExecutor` yet: wiring them into an agent is the loop's
 job (M5.1/M5.2), and doing it earlier would mean writing a mini-loop inside `UIUXAgent` and then
-deleting it.
+deleting it. **M5.2 is the milestone where the entire Phase 2 tool layer finally gets used.**
 
-**M3.1 (skill loading) is the one item that can be picked up out of order** — it depends only on
-M2.1 and M1.3, both done, and it is a self-contained registry. Useful if Phase 4 stalls.
+**M9.1 and M9.2 can be picked up at any time, in parallel with Phase 4** — the workspace primitive
+and the file tools need no model and no loop, exactly like M2.1 and M2.4 didn't. If Phase 4 stalls,
+build those.
 
 **Decisions settled (2026-08-29) — do not re-ask:**
 - **Prod model tag: `qwen3.8-27b`.** Verified the same day: it 404s from the public Ollama library,

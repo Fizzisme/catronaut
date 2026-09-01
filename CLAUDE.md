@@ -79,7 +79,8 @@ rest of that list is either built or has a milestone.
 
 - **First / current domain: `ui_ux`** — analyzes a UI (text description or screenshot) and returns
   actionable feedback on layout, accessibility, and design consistency. Currently **single-shot**:
-  one system prompt + one user message + one model call. No tools, no loop, no retrieval yet.
+  one system prompt + one user message + one model call. It has a 4-tool pack (M2.4) that
+  **nothing calls yet** — no loop, no retrieval.
 - **Second domain scaffolded (dirs only, no code): `code_review`**.
 - **Third domain planned, not yet scaffolded: `site_gen`.** Generates a small project's worth of
   real files from a prompt (e.g. "an e-commerce site in Nuxt.js") rather than reviewing an
@@ -132,7 +133,7 @@ Invariants the code honors — **keep these**:
 | Serving | Ollama on a GPU server | Ollama 0.33.1 |
 | Vision | Yes | **No** — `qwen3:4b` / `qwen3:8b` are text-only |
 | Speed | GPU | **CPU-only here, ~8 tok/s measured** |
-| Tool calling | Reliable, native | **Native works** (measured 2026-08-31) — but only tested with one tool |
+| Tool calling | Reliable, native (unverified — tag not running) | **Native works** (measured 2026-08-31); 4/4 correct selection with 4 tools registered |
 
 **On the prod tag:** `qwen3.8-27b` is the decided target. Verified 2026-08-29: it returns **404
 from the public Ollama library** (`registry.ollama.ai/v2/library/qwen3.8-27b`), so it cannot be
@@ -206,8 +207,9 @@ app/
 │   │   └── ollama_provider.py  httpx.AsyncClient; error mapping; </think> stripping;
 │   │                           extract_usage() from prompt_eval_count/eval_count/total_duration;
 │   │                           wraps registry schema into Ollama's function envelope; health()
-│   └── tools/                  (M2.1-M2.3) definitions, registry, parsing, execution policy —
-│       │                        no concrete tools yet (M2.4), nothing wired into an agent
+│   └── tools/                  (M2.1-M2.3) the shared tool machinery — definitions, registry,
+│       │                        parsing, execution policy. Concrete tools live per-domain (see
+│       │                        domains/ui_ux/tools/). Nothing here is wired into an agent yet.
 │       ├── base.py             Tool ABC: name, description, args_schema, read_only (no
 │       │                        default), timeout_s (default 30.0), async run(args)
 │       ├── registry.py         ToolRegistry: get(name), schema() -> [{name,description,
@@ -310,10 +312,14 @@ for its English-only exception).
   renamed **Runtime**, **Phase 3 — Skills** inserted, old Phases 3–6 renumbered to 4–7, new
   **Phase 8 — Extensibility and safety** (hooks → permissions → sandbox-if-triggered →
   sub-agents). Don't re-audit; see the STATUS block for the number mapping.
-- Sandboxing: **not needed for the `ui_ux` tool pack** — none of its tools execute code, resolve a
-  path, or make outbound requests. A capability declaration plus an allowlist (M8.2) is enough.
-  ROADMAP M8.3 lists the four triggers that would change this, `code_review` running a linter
-  being the first.
+- Sandboxing: **not needed for 3 of the `ui_ux` pack's 4 tools** — `check_contrast`,
+  `lookup_heuristic`, and `format_review` are pure computation / in-process lookup / string
+  formatting. **`fetch_docs` is the exception: it makes an outbound request to a model-supplied
+  URL**, which is ROADMAP M8.3's trigger #3. It ships with a tool-local SSRF guard
+  (DNS-resolved address allowlist, no redirects, size caps) instead of the full M8.2 permission
+  layer — a deliberate, documented trade, not an oversight. See ROADMAP M8.2's revised assessment
+  for why, and what changes when M8.2 lands. **Do not restate this bullet as "the `ui_ux` pack
+  needs no sandbox"** — that was true before `fetch_docs` and is not true now.
 - Sub-agents: **last milestone (M8.4)**, after the loop is stable. Isolated rebuilt context,
   subset permissions, structured-summary returns — never an inherited parent transcript.
 
