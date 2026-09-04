@@ -4,7 +4,7 @@
 
 ## STATUS (update this block whenever work lands)
 
-- **Last synced with code:** 2026-08-31
+- **Last synced with code:** 2026-09-04
 - **Branch:** `docs/site-gen-phase9` (off `develop`). M2.1–M2.4 and the phase restructure are all
   merged to `develop` (PRs #7–#11).
 - **⚠ ROADMAP phases were restructured on 2026-08-31 — milestone numbers moved.** Phase 1 was
@@ -80,9 +80,24 @@
   would be indexed; **M8.3 sandboxing is off the path entirely** now that nothing is built
   server-side. **Read ROADMAP's "Suggested execution order" block, not the phase numbers** — the
   numbers are conceptual layering and deliberately do not match build order.
-- **Next up:** **M4.1 (token budgeter)** — first item on the critical path; M5.1/M5.2 both need it.
-  **M9.1 (workspace primitive) and M9.2 (file tools) can be built in parallel at any time** — pure
-  Python, no model, no loop, exactly like M2.1 and M2.4 needed nothing running.
+- **M4.1 (token budgeter) is done (2026-09-04).** `app/core/token_budget.py`:
+  `count_tokens()` (UTF-8 **bytes**/4, not `len(str)` codepoints — BPE tokenizers operate on
+  bytes, so counting codepoints undercounts Vietnamese/CJK text where 1 codepoint costs 2-4
+  bytes; 15% safety margin on top; no tokenizer dependency, Ollama has no tokenize-only
+  endpoint) and `allocate_budget(profile, configured_num_ctx) -> TokenBudget`
+  (`system`/`retrieved_context`/`history`/`tool_results`/`reserved_output` slots). **Budgets key
+  off `min(profile.context_window, settings.model_num_ctx)`, not the profile alone** — dev's
+  `model_num_ctx` defaults to 4096, well under `qwen3:4b`'s 32768 profile ceiling, and budgeting
+  off the profile would size slots for a window Ollama was never actually given. **A real Qwen
+  tokenizer (HF `tokenizers` lib) was considered and rejected for now** — `qwen3.8-27b`'s vocab
+  isn't publicly confirmed (the tag 404s from Ollama's library), so bundling one verified only
+  against the dev tag would be false precision; revisit once the prod vocab is confirmed.
+  `Agent._new_run_context` now sets `run.token_budget` on every request; nothing reads the slots
+  yet (M4.2/M4.3 are the first consumers). 8 new tests, 86 total, all green.
+- **Next up:** **M4.2 (message assembly pipeline)** — the next item on the critical path;
+  M5.1/M5.2 both need it. **M9.1 (workspace primitive) and M9.2 (file tools) can still be built in
+  parallel at any time** — pure Python, no model, no loop, exactly like M2.1 and M2.4 needed
+  nothing running.
 - **Do not redo Phase 0 or Phase 1.** The missing `config.py`, missing `model_provider/`, UTF-16
   `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**. `ModelProfile`,
   `RunContext`, usage metrics all exist — don't re-derive them.
@@ -224,8 +239,12 @@ app/
 │   ├── run_context.py          RunContext(run_id, domain, model_profile, session_id, ...)
 │   ├── exceptions.py           CatronautError tree + register_exception_handlers()
 │   ├── lifespan.py             startup: OllamaProvider + Orchestrator; shutdown: aclose()
-│   ├── agent_base.py           abstract `Agent`; `_new_run_context()`; `_build_output()` also
-│   │                           extracts usage + logs the structured "done" line (M1.5)
+│   ├── agent_base.py           abstract `Agent`; `_new_run_context()` also sets `run.token_budget`
+│   │                           (M4.1); `_build_output()` extracts usage + logs the structured
+│   │                           "done" line (M1.5)
+│   ├── token_budget.py         (M4.1) count_tokens(); allocate_budget(profile, num_ctx) ->
+│   │                           TokenBudget (system/retrieved_context/history/tool_results/
+│   │                           reserved_output); nothing reads the slots yet — M4.2/M4.3 do
 │   ├── orchestrator.py         domain -> agent instance; raises UnknownDomainError
 │   ├── model_provider/
 │   │   ├── base.py             ModelProvider ABC: chat(), aclose(), extract_content(),
@@ -270,8 +289,8 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `scripts/smoke_test.py` + `scripts/tool_call_check.py` (live M2.2 check) +
 `scripts/ui_ux_tool_pack_check.py` (live M2.4 check, all 4 tools + 1 real fetch; none in pytest),
 `tests/test_api.py` (17) + `tests/test_tools.py` (5) + `tests/test_tool_parsing.py` (22) +
-`tests/test_tool_execution.py` (8) + `tests/test_ui_ux_tools.py` (26), `docs/FLOW.md` (see §5
-for its English-only exception).
+`tests/test_tool_execution.py` (8) + `tests/test_ui_ux_tools.py` (26) +
+`tests/test_token_budget.py` (8, M4.1), `docs/FLOW.md` (see §5 for its English-only exception).
 
 ## 5. Conventions — follow these
 
@@ -366,8 +385,10 @@ for its English-only exception).
    The Go gateway already retries; adding a second retry layer here would stack with it and risk
    multi-minute worst-case latency on top of the 44s–600s a single call already takes. Do not
    re-add this without a reason that outweighs that.
-2. **No loop, no RAG, no context budgeting, no session/history, and no agent uses the tool
-   layer.** `UIUXAgent` is still single-shot and stateless. The entire tool layer is now done —
+2. **No loop, no RAG, no message assembly pipeline, no session/history, and no agent uses the
+   tool layer.** `UIUXAgent` is still single-shot and stateless. The token budgeter exists (M4.1)
+   and `RunContext.token_budget` is populated on every request, but nothing consumes the slots —
+   that starts with M4.2. The entire tool layer is now done —
    `Tool`/`ToolRegistry` (M2.1), parsing/repair (M2.2), allowlist/timeout/truncation (M2.3), and
    4 real `ui_ux` tools (M2.4) — and tested, including live against `qwen3:4b`, but **nothing
    calls it**: not wired into `Agent`/`Orchestrator`. Wiring belongs to the loop (M5.1/M5.2);

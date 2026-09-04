@@ -526,14 +526,78 @@ profile's cap fails at startup, instead of silently degrading the 4B's tool sele
 
 ## Phase 4 — Context management
 
-### M4.1 — Token budgeter
-A single component that owns the window: counts tokens (via Ollama, or a tokenizer approximation
-with a safety margin), and allocates a budget — system, retrieved context, history, tool results,
-reserved output. Budgets come from `ModelProfile.context_window`, so the dev/prod difference is
-one config value.
-**Depends on:** M1.1. **Blocks M6.4.**
-**[4B gap]** This is where prod-vs-dev is most visible. On the 27B you can be generous; on the 4B
-every section is competing. Build and tune against the 4B numbers.
+### [x] M4.1 — Token budgeter — DONE (2026-09-04)
+
+Shipped [app/core/token_budget.py](../app/core/token_budget.py): `count_tokens(text) -> int`
+and `allocate_budget(profile, configured_num_ctx) -> TokenBudget`, a frozen dataclass with
+`system` / `retrieved_context` / `history` / `tool_results` / `reserved_output` slots plus
+`.to_dict()`.
+
+**No tokenizer library is bundled** — Python 3.10, and Ollama exposes no tokenize-only endpoint
+(`extract_usage`'s `prompt_eval_count` only exists after a call completes, too late for a
+pre-send budget). A real Qwen tokenizer (HuggingFace `tokenizers`, no `transformers`/`torch`
+needed) was considered and rejected for now: `qwen3.8-27b` (the prod tag) 404s from the public
+Ollama library, so its exact vocab isn't confirmed available — bundling a tokenizer verified only
+against the dev tag would be a false precision. `count_tokens` counts **UTF-8 bytes, not
+`len(str)` codepoints**, then applies chars-per-token math with a 15% safety margin: BPE
+tokenizers (Qwen included) operate on UTF-8 bytes, so a Vietnamese or CJK character — 1
+codepoint but 2-4 bytes — costs more tokens than an ASCII character at the same codepoint count.
+A codepoint-based heuristic systematically undercounts non-ASCII text; counting bytes tracks the
+real cost much closer, with no new dependency. Revisit the real-tokenizer option once
+`qwen3.8-27b`'s vocab is confirmed (it likely shares Qwen3's family-wide tokenizer, but that is
+still an unverified assumption, not a fact to build on).
+
+**Budgets are keyed off the effective window, not just `ModelProfile.context_window`** — the
+original wording above. `effective_context_window()` takes `min(profile.context_window,
+configured_num_ctx)`: `Settings.model_num_ctx` (the value actually sent to Ollama as
+`options.num_ctx`, default 4096 in dev) is well under `qwen3:4b`'s 32768-token profile ceiling,
+and budgeting off the profile alone would allocate slots the model was never actually given.
+`lifespan.py` already warns the other direction (num_ctx exceeding the profile); this is the
+same mismatch guarded from the budgeter's side.
+
+Slot split (fractions of the effective window, tuned for the 4B per the `[4B gap]` note below):
+`reserved_output` 0.30, `history` 0.30, `retrieved_context` 0.15, `tool_results` 0.15, `system`
+0.10. Reserved output ties history for the largest share deliberately — CLAUDE.md §3's measured
+behaviour is that `qwen3:4b` always reasons regardless of `think`, and a tight reserved-output
+slot truncates mid-reasoning into an empty answer (observed), not a short one.
+
+**Wired into `RunContext` immediately**, not left for M4.2: `Agent._new_run_context`
+(`app/core/agent_base.py`) now calls `allocate_budget(profile, settings.model_num_ctx)` and sets
+`run.token_budget` on every request. Nothing reads the slots yet — M4.2's assembly pipeline and
+M4.3's truncation are the first real consumers — but the field is no longer always `None`.
+
+**Slot ownership clarified for the loop (asked and answered before M5.2 exists, so the
+milestone starts unambiguous):** `tool_results` is the CURRENT run's own ReAct scratchpad — the
+`assistant(tool_calls) + tool(result)` pairs a single run accumulates across M5.2's loop
+iterations — not `history`, and not `reserved_output` once a response has been received (that
+slot is re-guaranteed fresh every iteration per M5.2's "every iteration re-runs the budgeter",
+sized for the response about to be generated, not output already in hand). `history` is prior
+*requests'* turns, re-sent by the client (M4.4 stateless). M4.2's message order names two
+sub-segments — `(summarized history)` then `recent turns` — but they are one budget pool over
+the compaction lifecycle (M4.3 folds dropped `recent_turns` into the `summarized_history`
+message), not two independently-sized slots — **there is deliberately no separate
+`recent_turns` slot.** Documented in `token_budget.py`'s module docstring and `TokenBudget`'s
+field comments, not just here.
+
+**Flagged, not fixed: `tool_results` at 0.15 is unverified against real loop numbers.** At the
+dev-default 4096-token window that's ~614 tokens, and M2.3's 2000-char per-result truncation cap
+(already a placeholder) eats ~575 of those in ONE result — with M5.2's planned 2-3 max
+iterations on the 4B, this slot will likely trigger M4.3 truncation almost every loop. Re-tune
+this fraction together with M4.3/M5.2 once a real loop exists to measure against; do not
+hand-tune it blind now.
+
+8 new tests in [tests/test_token_budget.py](../tests/test_token_budget.py) (86 total): empty-text
+count, the overestimate math, a Vietnamese-text regression proving the byte-based count exceeds
+what a codepoint-based one would give, the effective-window clamp in both directions, slot sum ≤
+total, reserved-output as the largest slot, scaling between a small and large profile, and
+`.to_dict()` shape. Full suite re-run green.
+
+**Depends on:** M1.1. ✅ **Blocks M6.4** — now unblocked.
+**[4B gap]** Confirmed the concern the milestone flagged: on `qwen3:4b`'s dev-default 4096-token
+effective window, `reserved_output` comes out to ~1228 tokens — generous enough for the several
+hundred tokens of reasoning CLAUDE.md §3 measured, but real fractions had to be tuned against
+that number, not the profile's 32768 ceiling, or the budget would have described a window three
+times bigger than what Ollama is actually given.
 
 ### M4.2 — Message assembly pipeline
 A deterministic builder producing the final message list in a fixed order:
@@ -1006,9 +1070,10 @@ DONE
 [x] M1.1 → M1.2 → M1.3 → M1.4 → M1.5     (runtime. M1.2 retry skipped by decision;
                                            M1.5's JSONL persistence deferred to M7.2)
 [x] M2.1 → M2.2 → M2.3 → M2.4            (tools. Tool-call format frozen — the loop's hard gate)
+[x] M4.1                                 (token budgeter — wired into RunContext, not just built)
 
 CRITICAL PATH — the shortest route to "type a prompt, get generated files, see them rendered"
-    M4.1 → M4.2                          (budgeter, then assembly — M5.1/M5.2 need both)
+    M4.2                                 (assembly pipeline — M5.1/M5.2 need it; M4.1 is done)
     M5.1 → M5.2                          (loop. M5.2 is where the Phase 2 tool layer is finally
                                            used by anything at all)
     M9.1 → M9.2 → M9.3 → M9.4            (workspace → file tools → domain → wire into the loop)
@@ -1056,8 +1121,8 @@ BLOCKED ON INFRASTRUCTURE, NOT ENGINEERING
     M6.3                                 (needs an embedding model this runner does not have)
 ```
 
-**Phases 0–2 are fully done.** Next up is the critical path above: **M4.1 → M4.2 → M4.3 →
-M5.1 → M5.2**, then Phase 9.
+**Phases 0–2 are fully done, and M4.1 (token budgeter) is done too.** Next up is the critical
+path above: **M4.2 → M4.3 → M5.1 → M5.2**, then Phase 9.
 
 Nothing calls `ToolCallResolver` or `ToolExecutor` yet: wiring them into an agent is the loop's
 job (M5.1/M5.2), and doing it earlier would mean writing a mini-loop inside `UIUXAgent` and then
@@ -1094,7 +1159,8 @@ build those.
   RAG (5 milestones) and fine-tuning (6) — both of which exist to make **review** better — ahead of
   Phase 9. Neither is needed to generate a project from a prompt. The critical path is now
   `M4.1 → M4.2 → M5.1 → M5.2 → M9.1 → M9.2 → M9.3 → M9.4` (8 milestones instead of ~25 to a
-  working product). RAG, skills, fine-tuning, and hooks are **deferred, not cancelled** — `ui_ux`
+  working product) — **M4.1 shipped 2026-09-04**, so `M4.2` is the next one. RAG, skills,
+  fine-tuning, and hooks are **deferred, not cancelled** — `ui_ux`
   review remains a real domain and those milestones still describe how to make it good.
   **Do not re-derive this ordering from phase numbers** — the numbers reflect conceptual layering,
   the execution-order block reflects what to build next.

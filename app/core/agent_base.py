@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from app.core.config import settings
 from app.core.model_provider.base import ModelProvider
 from app.core.run_context import RunContext
+from app.core.token_budget import allocate_budget
 from app.schemas.agent import AgentInput, AgentOutput
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,12 @@ class Agent(ABC):
         ...
 
     def _new_run_context(self, session_id: str | None = None) -> RunContext:
+        profile = settings.model_profile
         return RunContext(
             domain=self.domain,
-            model_profile=settings.model_profile,
+            model_profile=profile,
             session_id=session_id,
+            token_budget=allocate_budget(profile, settings.model_num_ctx).to_dict(),
         )
 
     def _build_output(self, run: RunContext, raw: dict, content: str) -> AgentOutput:
