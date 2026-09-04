@@ -81,14 +81,19 @@
   server-side. **Read ROADMAP's "Suggested execution order" block, not the phase numbers** — the
   numbers are conceptual layering and deliberately do not match build order.
 - **M4.1 (token budgeter) is done (2026-09-04).** `app/core/token_budget.py`:
-  `count_tokens()` (chars/4, 15% safety margin — no tokenizer dependency, Ollama has no
-  tokenize-only endpoint) and `allocate_budget(profile, configured_num_ctx) -> TokenBudget`
+  `count_tokens()` (UTF-8 **bytes**/4, not `len(str)` codepoints — BPE tokenizers operate on
+  bytes, so counting codepoints undercounts Vietnamese/CJK text where 1 codepoint costs 2-4
+  bytes; 15% safety margin on top; no tokenizer dependency, Ollama has no tokenize-only
+  endpoint) and `allocate_budget(profile, configured_num_ctx) -> TokenBudget`
   (`system`/`retrieved_context`/`history`/`tool_results`/`reserved_output` slots). **Budgets key
   off `min(profile.context_window, settings.model_num_ctx)`, not the profile alone** — dev's
   `model_num_ctx` defaults to 4096, well under `qwen3:4b`'s 32768 profile ceiling, and budgeting
-  off the profile would size slots for a window Ollama was never actually given.
+  off the profile would size slots for a window Ollama was never actually given. **A real Qwen
+  tokenizer (HF `tokenizers` lib) was considered and rejected for now** — `qwen3.8-27b`'s vocab
+  isn't publicly confirmed (the tag 404s from Ollama's library), so bundling one verified only
+  against the dev tag would be false precision; revisit once the prod vocab is confirmed.
   `Agent._new_run_context` now sets `run.token_budget` on every request; nothing reads the slots
-  yet (M4.2/M4.3 are the first consumers). 7 new tests, 85 total, all green.
+  yet (M4.2/M4.3 are the first consumers). 8 new tests, 86 total, all green.
 - **Next up:** **M4.2 (message assembly pipeline)** — the next item on the critical path;
   M5.1/M5.2 both need it. **M9.1 (workspace primitive) and M9.2 (file tools) can still be built in
   parallel at any time** — pure Python, no model, no loop, exactly like M2.1 and M2.4 needed
@@ -285,7 +290,7 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `scripts/ui_ux_tool_pack_check.py` (live M2.4 check, all 4 tools + 1 real fetch; none in pytest),
 `tests/test_api.py` (17) + `tests/test_tools.py` (5) + `tests/test_tool_parsing.py` (22) +
 `tests/test_tool_execution.py` (8) + `tests/test_ui_ux_tools.py` (26) +
-`tests/test_token_budget.py` (7, M4.1), `docs/FLOW.md` (see §5 for its English-only exception).
+`tests/test_token_budget.py` (8, M4.1), `docs/FLOW.md` (see §5 for its English-only exception).
 
 ## 5. Conventions — follow these
 

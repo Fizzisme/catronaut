@@ -1,5 +1,7 @@
 """Unit tests for the M4.1 token budgeter. Pure functions, no model calls."""
 
+import math
+
 from app.core.model_profile import ModelProfile
 from app.core.token_budget import (
     allocate_budget,
@@ -31,8 +33,17 @@ def test_count_tokens_empty_string_is_zero():
 
 
 def test_count_tokens_scales_with_length_and_overestimates():
-    # 400 chars / 4 chars-per-token = 100, plus the 15% safety margin.
+    # ASCII: 1 byte/char, so 400 chars = 400 bytes / 4 bytes-per-token = 100,
+    # plus the 15% safety margin.
     assert count_tokens("a" * 400) == 115
+
+
+def test_count_tokens_counts_utf8_bytes_not_codepoints():
+    # Vietnamese diacritics are 1 codepoint but 2-3 bytes in UTF-8 — a codepoint-based
+    # chars/4 heuristic would undercount this text relative to a byte-based one.
+    text = "Xin chào các bạn, đây là một câu tiếng Việt có dấu"
+    char_based_estimate = math.ceil(len(text) / 4 * 1.15)
+    assert count_tokens(text) > char_based_estimate
 
 
 def test_effective_context_window_uses_the_smaller_of_the_two():

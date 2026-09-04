@@ -15,9 +15,15 @@ from app.core.model_profile import ModelProfile
 # No tokenizer is bundled (Python 3.10, no new dependency — same call made for fetch_docs's
 # stdlib HTML parsing) and Ollama exposes no tokenize-only endpoint: extract_usage's
 # prompt_eval_count only exists after a call completes, too late for a pre-send budget.
-# chars/4 is the standard rough estimate for English/code text; the 15% margin biases toward
-# overestimating, since a count that's too low is the one that actually overflows the window.
-_CHARS_PER_TOKEN = 4
+#
+# Counted in UTF-8 BYTES, not `len(str)` codepoints: BPE tokenizers (Qwen included) operate on
+# UTF-8 bytes, so a Vietnamese or CJK character — 1 codepoint but 2-4 bytes — costs more tokens
+# than an ASCII character of the same codepoint count. A codepoint-based chars/4 heuristic
+# systematically undercounts non-ASCII text; counting bytes tracks the real cost much closer,
+# with no new dependency. 4 bytes/token is the standard rough estimate; the 15% margin biases
+# toward overestimating on top of that, since a count that's too low is the one that actually
+# overflows the window.
+_BYTES_PER_TOKEN = 4
 _SAFETY_MARGIN = 1.15
 
 # Fractions of the effective window (see effective_context_window) — must sum to 1.0.
@@ -52,11 +58,12 @@ class TokenBudget:
 
 
 def count_tokens(text: str) -> int:
-    """Approximate token count for text not yet sent to the model. See the module
-    docstring for why this is chars/4 with a safety margin rather than a real tokenizer."""
+    """Approximate token count for text not yet sent to the model. See the module docstring
+    for why this counts UTF-8 bytes (not `len(str)` codepoints) with a safety margin, rather
+    than a real tokenizer."""
     if not text:
         return 0
-    return math.ceil(len(text) / _CHARS_PER_TOKEN * _SAFETY_MARGIN)
+    return math.ceil(len(text.encode("utf-8")) / _BYTES_PER_TOKEN * _SAFETY_MARGIN)
 
 
 def effective_context_window(profile: ModelProfile, configured_num_ctx: int) -> int:

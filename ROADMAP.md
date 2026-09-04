@@ -529,11 +529,23 @@ profile's cap fails at startup, instead of silently degrading the 4B's tool sele
 ### [x] M4.1 — Token budgeter — DONE (2026-09-04)
 
 Shipped [app/core/token_budget.py](../app/core/token_budget.py): `count_tokens(text) -> int`
-(chars/4 with a 15% safety margin — no tokenizer library is bundled, Python 3.10, and Ollama
-exposes no tokenize-only endpoint; `extract_usage`'s `prompt_eval_count` only exists after a
-call completes, too late for a pre-send budget) and `allocate_budget(profile,
-configured_num_ctx) -> TokenBudget`, a frozen dataclass with `system` / `retrieved_context` /
-`history` / `tool_results` / `reserved_output` slots plus `.to_dict()`.
+and `allocate_budget(profile, configured_num_ctx) -> TokenBudget`, a frozen dataclass with
+`system` / `retrieved_context` / `history` / `tool_results` / `reserved_output` slots plus
+`.to_dict()`.
+
+**No tokenizer library is bundled** — Python 3.10, and Ollama exposes no tokenize-only endpoint
+(`extract_usage`'s `prompt_eval_count` only exists after a call completes, too late for a
+pre-send budget). A real Qwen tokenizer (HuggingFace `tokenizers`, no `transformers`/`torch`
+needed) was considered and rejected for now: `qwen3.8-27b` (the prod tag) 404s from the public
+Ollama library, so its exact vocab isn't confirmed available — bundling a tokenizer verified only
+against the dev tag would be a false precision. `count_tokens` counts **UTF-8 bytes, not
+`len(str)` codepoints**, then applies chars-per-token math with a 15% safety margin: BPE
+tokenizers (Qwen included) operate on UTF-8 bytes, so a Vietnamese or CJK character — 1
+codepoint but 2-4 bytes — costs more tokens than an ASCII character at the same codepoint count.
+A codepoint-based heuristic systematically undercounts non-ASCII text; counting bytes tracks the
+real cost much closer, with no new dependency. Revisit the real-tokenizer option once
+`qwen3.8-27b`'s vocab is confirmed (it likely shares Qwen3's family-wide tokenizer, but that is
+still an unverified assumption, not a fact to build on).
 
 **Budgets are keyed off the effective window, not just `ModelProfile.context_window`** — the
 original wording above. `effective_context_window()` takes `min(profile.context_window,
@@ -554,10 +566,11 @@ slot truncates mid-reasoning into an empty answer (observed), not a short one.
 `run.token_budget` on every request. Nothing reads the slots yet — M4.2's assembly pipeline and
 M4.3's truncation are the first real consumers — but the field is no longer always `None`.
 
-7 new tests in [tests/test_token_budget.py](../tests/test_token_budget.py) (85 total): empty-text
-count, the overestimate math, the effective-window clamp in both directions, slot sum ≤ total,
-reserved-output as the largest slot, scaling between a small and large profile, and `.to_dict()`
-shape. Full suite re-run green.
+8 new tests in [tests/test_token_budget.py](../tests/test_token_budget.py) (86 total): empty-text
+count, the overestimate math, a Vietnamese-text regression proving the byte-based count exceeds
+what a codepoint-based one would give, the effective-window clamp in both directions, slot sum ≤
+total, reserved-output as the largest slot, scaling between a small and large profile, and
+`.to_dict()` shape. Full suite re-run green.
 
 **Depends on:** M1.1. ✅ **Blocks M6.4** — now unblocked.
 **[4B gap]** Confirmed the concern the milestone flagged: on `qwen3:4b`'s dev-default 4096-token
