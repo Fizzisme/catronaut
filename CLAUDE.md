@@ -5,8 +5,8 @@
 ## STATUS (update this block whenever work lands)
 
 - **Last synced with code:** 2026-08-31
-- **Branch:** `feat/ui-ux-tool-pack` (off `develop`). M2.1–M2.3 and the phase restructure are all
-  merged to `develop` (PRs #7–#10).
+- **Branch:** `docs/site-gen-phase9` (off `develop`). M2.1–M2.4 and the phase restructure are all
+  merged to `develop` (PRs #7–#11).
 - **⚠ ROADMAP phases were restructured on 2026-08-31 — milestone numbers moved.** Phase 1 was
   renamed **Runtime** (it is scaffolding, not the agent harness), a new **Phase 3 — Skills** was
   inserted, and the old Phases 3–6 became **4–7**, plus a new **Phase 8 — Extensibility and
@@ -21,9 +21,9 @@
 - **Phase 2 (Tools) is fully done, M2.1 through M2.4 — the whole tool layer through a real tool
   pack.** `Tool`/`ToolRegistry` (M2.1), `parsing.py`/`resolver.py` (M2.2, envelope frozen),
   `policy.py`/`executor.py` (M2.3), and now `app/domains/ui_ux/tools/` — 4 concrete tools:
-  `check_contrast`, `lookup_heuristic`, `format_review`, `fetch_docs` (M2.4, on
-  `feat/ui-ux-tool-pack`, not yet merged). 78 tests pass. **Nothing calls any of this yet** —
-  wiring the tool layer into an agent is the loop's job (M5.1/M5.2).
+  `check_contrast`, `lookup_heuristic`, `format_review`, `fetch_docs` (M2.4, merged). 78 tests
+  pass. **Nothing calls any of this yet** — wiring the tool layer into an agent is the loop's job
+  (M5.1/M5.2).
 - **⚠ `qwen3:4b` DOES support native tool calling — measured 2026-08-31, and the profile was
   wrong.** Ollama reports `capabilities: ['completion','tools','thinking']`; a real call returned
   a well-formed `message.tool_calls` (37.3s, 510 tokens). `ModelProfile` now says
@@ -45,9 +45,44 @@
   typed `str` with no multimodal path back into the message list, and screenshotting needs a
   headless browser this service doesn't otherwise depend on. Don't build it speculatively; see
   the ROADMAP entry for what would need to exist first.
-- **Next up:** M3.1 (skill loading) is the next milestone that doesn't need anything else to
-  start — Phase 2 is done. M4.1 (token budgeter) is the next item in the ROADMAP's suggested
-  build order.
+- **New: ROADMAP Phase 9 — `site_gen` — designed 2026-08-31, ZERO code written.** A new domain
+  where a user says "build me an e-commerce site" and gets **real generated files back, previewed
+  in the browser** — plus follow-ups like "that button's colour is wrong", which the agent fixes by
+  reading and rewriting the file. Documentation only: milestones `M9.1`–`M9.8` in `ROADMAP.md`,
+  nothing under `app/`. Decisions that must not be re-litigated:
+  - **Separate domain, not a mode inside `ui_ux`** — `ToolPolicy` has no per-mode scoping, `ui_ux`
+    is already at the measured tool cap, and mixing write-capable tools in would falsify the
+    `ui_ux` sandbox claim in §6.
+  - **This service never builds or runs generated code.** Preview is **Sandpack** (MIT) in the
+    user's browser — zero server cost. StackBlitz WebContainer was rejected: commercial licence
+    required, and its mandatory COEP/COOP headers risk breaking the Next.js frontend.
+    **Consequence: M8.3 sandboxing is off the path entirely** — trigger #1 never fires.
+  - **Sandpack has no `nuxt` template → unsupported frameworks fall back to `vite-react`**, and
+    the response must say so.
+  - **Stateless.** Workspace lives on disk keyed by `project_id`; conversation `history` is
+    re-sent by the client each turn. **M4.4 session store is not needed** for either the discovery
+    loop or iterative editing.
+  - **Ambition is profile-split, not gated all-or-nothing** — `qwen3.8-27b` isn't running
+    anywhere, so a large-only gate would make the phase permanently undone by this project's own
+    rule. Mechanics are measurable on `qwen3:4b` now; only the full multi-page ambition is
+    large-tier (M9.7, BLOCKED on GPU-server infra).
+  - **Skills matter here and are on the path** (M3.1 → M9.6): skill content starts from
+    OpenDesign's `SKILL.md` design-pattern files — verified **Apache-2.0, no NOTICE file**, so
+    reuse is permitted with attribution. **RAG waits** until M6.1 decides what would even be
+    indexed.
+- **⚠ Build order was reprioritised 2026-08-31: `site_gen` (Phase 9) is the PRIMARY product.**
+  The ROADMAP was written when `ui_ux` review was the product, so its phase order put RAG (5
+  milestones) and fine-tuning (6) — both of which only make *review* better — ahead of code
+  generation. Neither is needed to generate a project from a prompt. **Critical path is now
+  `M4.1 → M4.2 → M5.1 → M5.2 → M9.1 → M9.2 → M9.3 → M9.4 → M9.5`** (through iterative editing —
+  the product is not usable without it). Then `M3.1 → M9.6` adds skills and the ask-back turn.
+  Fine-tuning and hooks are **deferred, not cancelled**; **RAG waits on M6.1** answering what
+  would be indexed; **M8.3 sandboxing is off the path entirely** now that nothing is built
+  server-side. **Read ROADMAP's "Suggested execution order" block, not the phase numbers** — the
+  numbers are conceptual layering and deliberately do not match build order.
+- **Next up:** **M4.1 (token budgeter)** — first item on the critical path; M5.1/M5.2 both need it.
+  **M9.1 (workspace primitive) and M9.2 (file tools) can be built in parallel at any time** — pure
+  Python, no model, no loop, exactly like M2.1 and M2.4 needed nothing running.
 - **Do not redo Phase 0 or Phase 1.** The missing `config.py`, missing `model_provider/`, UTF-16
   `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**. `ModelProfile`,
   `RunContext`, usage metrics all exist — don't re-derive them.
@@ -67,8 +102,17 @@ rest of that list is either built or has a milestone.
 
 - **First / current domain: `ui_ux`** — analyzes a UI (text description or screenshot) and returns
   actionable feedback on layout, accessibility, and design consistency. Currently **single-shot**:
-  one system prompt + one user message + one model call. No tools, no loop, no retrieval yet.
+  one system prompt + one user message + one model call. It has a 4-tool pack (M2.4) that
+  **nothing calls yet** — no loop, no retrieval.
 - **Second domain scaffolded (dirs only, no code): `code_review`**.
+- **Third domain planned, not yet scaffolded: `site_gen` — and it is the primary product.**
+  Generates a small project's worth of real files from a prompt ("build me an e-commerce site"),
+  then edits them on follow-up ("that button's colour is wrong"). Two output modes: plain
+  HTML/CSS/JS when no framework is named, otherwise files shaped for a **Sandpack** template
+  (falling back to `vite-react` for anything Sandpack cannot render, `nuxt` included).
+  **This service only writes files — the frontend renders the preview via Sandpack; nothing is
+  built or executed here.** Designed as ROADMAP Phase 9 (M9.1–M9.8); nothing under
+  `app/domains/site_gen/` exists yet.
 
 ### This service runs behind an existing Go API gateway
 
@@ -116,7 +160,7 @@ Invariants the code honors — **keep these**:
 | Serving | Ollama on a GPU server | Ollama 0.33.1 |
 | Vision | Yes | **No** — `qwen3:4b` / `qwen3:8b` are text-only |
 | Speed | GPU | **CPU-only here, ~8 tok/s measured** |
-| Tool calling | Reliable, native | **Native works** (measured 2026-08-31) — but only tested with one tool |
+| Tool calling | Reliable, native (unverified — tag not running) | **Native works** (measured 2026-08-31); 4/4 correct selection with 4 tools registered |
 
 **On the prod tag:** `qwen3.8-27b` is the decided target. Verified 2026-08-29: it returns **404
 from the public Ollama library** (`registry.ollama.ai/v2/library/qwen3.8-27b`), so it cannot be
@@ -190,8 +234,9 @@ app/
 │   │   └── ollama_provider.py  httpx.AsyncClient; error mapping; </think> stripping;
 │   │                           extract_usage() from prompt_eval_count/eval_count/total_duration;
 │   │                           wraps registry schema into Ollama's function envelope; health()
-│   └── tools/                  (M2.1-M2.3) definitions, registry, parsing, execution policy —
-│       │                        no concrete tools yet (M2.4), nothing wired into an agent
+│   └── tools/                  (M2.1-M2.3) the shared tool machinery — definitions, registry,
+│       │                        parsing, execution policy. Concrete tools live per-domain (see
+│       │                        domains/ui_ux/tools/). Nothing here is wired into an agent yet.
 │       ├── base.py             Tool ABC: name, description, args_schema, read_only (no
 │       │                        default), timeout_s (default 30.0), async run(args)
 │       ├── registry.py         ToolRegistry: get(name), schema() -> [{name,description,
@@ -294,12 +339,26 @@ for its English-only exception).
   renamed **Runtime**, **Phase 3 — Skills** inserted, old Phases 3–6 renumbered to 4–7, new
   **Phase 8 — Extensibility and safety** (hooks → permissions → sandbox-if-triggered →
   sub-agents). Don't re-audit; see the STATUS block for the number mapping.
-- Sandboxing: **not needed for the `ui_ux` tool pack** — none of its tools execute code, resolve a
-  path, or make outbound requests. A capability declaration plus an allowlist (M8.2) is enough.
-  ROADMAP M8.3 lists the four triggers that would change this, `code_review` running a linter
-  being the first.
+- Sandboxing: **not needed for 3 of the `ui_ux` pack's 4 tools** — `check_contrast`,
+  `lookup_heuristic`, and `format_review` are pure computation / in-process lookup / string
+  formatting. **`fetch_docs` is the exception: it makes an outbound request to a model-supplied
+  URL**, which is ROADMAP M8.3's trigger #3. It ships with a tool-local SSRF guard
+  (DNS-resolved address allowlist, no redirects, size caps) instead of the full M8.2 permission
+  layer — a deliberate, documented trade, not an oversight. See ROADMAP M8.2's revised assessment
+  for why, and what changes when M8.2 lands. **Do not restate this bullet as "the `ui_ux` pack
+  needs no sandbox"** — that was true before `fetch_docs` and is not true now.
 - Sub-agents: **last milestone (M8.4)**, after the loop is stable. Isolated rebuilt context,
   subset permissions, structured-summary returns — never an inherited parent transcript.
+- Preview for `site_gen`: **Sandpack in the user's browser** (MIT, no licence fee, no COEP/COOP
+  headers). WebContainer rejected — commercial licence + headers that could break the Next.js
+  frontend. **This service builds and runs nothing**, so ROADMAP M8.3 sandboxing is off the path.
+- `site_gen` statefulness: **none.** Workspace on disk keyed by `project_id`, conversation
+  `history` re-sent by the client each turn. M4.4 session store is not required.
+- Unsupported frameworks in `site_gen`: **fall back to `vite-react`** and say so in the response.
+  Sandpack has no `nuxt` template.
+- Skill content: **starts from OpenDesign's `SKILL.md` files** (Apache-2.0, no NOTICE — reuse
+  allowed with a licence copy, attribution, and a statement of changes). Select a handful, trim
+  each to ≤300 tokens; do not import all 533.
 
 **Known limitations of the current implementation:**
 

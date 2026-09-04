@@ -1,15 +1,23 @@
 # ROADMAP.md — Catronaut agent system
 
 Implementation roadmap for the remaining core pieces: **Runtime, Tools, Skills, Context, Loop,
-RAG, Fine-tuning, Extensibility**. Milestones are sequential and numbered; dependencies are stated
-per milestone.
+RAG, Fine-tuning, Extensibility, Code generation**. Milestones are numbered by conceptual layer;
+**the order to build them in is the "Suggested execution order" block near the bottom**, which
+diverges from the numbering on purpose.
+
+**The primary product is Phase 9 (`site_gen`)** — a user describes a project and gets real
+generated files back. `ui_ux` (review) came first historically and stays a supported domain, but
+the build order is optimised for reaching a working generator, not a polished reviewer. See
+"Decisions settled" for why, and what that defers.
 
 Read [CLAUDE.md](CLAUDE.md) first — it records current state and conventions.
 
-**Progress: Phase 0, Phase 1, and M2.1 are complete (2026-08-31).** The service boots, `/health`
-reports the model backend, `POST /ui-ux/analyze` answers with a real `qwen3:4b` response, and the
-`Tool`/`ToolRegistry` definition layer exists. Milestones are marked `[x]` as they land — keep this
-file updated so other sessions don't redo finished work.
+**Progress: Phases 0, 1, and 2 are complete (2026-08-31).** The service boots, `/health` reports
+the model backend, `POST /ui-ux/analyze` answers with a real `qwen3:4b` response, and the entire
+tool layer exists and is tested — definition/registry (M2.1), parsing/repair (M2.2), execution
+policy (M2.3), and a 4-tool `ui_ux` pack (M2.4). **Nothing calls the tool layer yet** — that is
+the loop's job (M5.2). Milestones are marked `[x]` as they land — keep this file updated so other
+sessions don't redo finished work.
 
 **Guiding constraints throughout:**
 
@@ -44,6 +52,7 @@ graph TD
   P5 --> P7[Phase 7 — Fine-tuning]
   P6 --> P7
   P5 --> P8[Phase 8 — Extensibility and safety]
+  P5 --> P9[Phase 9 — Code generation workspace]
 ```
 
 The three hard ordering rules:
@@ -146,10 +155,15 @@ Phase 2. See the terminology note at the top of this file.
 Shipped [app/core/model_profile.py](../app/core/model_profile.py): a frozen `ModelProfile`
 dataclass (`name, context_window, supports_vision, supports_native_tools, tool_call_style
 [native|prompt|none], reliability_tier [small|large]`) plus `get_model_profile(model_name)`,
-keyed by exact Ollama tag. Registered: `qwen3:4b` and `qwen3:8b` (both `small`, no vision, no
-native tools, prompt-style tool calling), `qwen3.8-27b` (`large`, vision, native tools). An
-unregistered `model_name` falls back to a conservative default profile with a logged warning,
-instead of guessing or crashing.
+keyed by exact Ollama tag. An unregistered `model_name` falls back to a conservative default
+profile with a logged warning, instead of guessing or crashing.
+
+**⚠ The tool-calling values this milestone shipped for `qwen3:4b` were later measured and found
+wrong — see M2.2.** M1.1 registered `qwen3:4b` and `qwen3:8b` as "no native tools, prompt-style"
+purely as a guess, made while nothing consumed those fields. M2.2 measured the real model:
+`qwen3:4b` is `supports_native_tools=True`, `tool_call_style="native"`. `qwen3:8b` stays on the
+prompt path — same family, but never measured. `qwen3.8-27b` (`large`, vision, native tools) is
+unchanged and still unverified, since that tag isn't running anywhere yet.
 
 Wired in, not left dead:
 - `Settings.model_profile` — a property on `settings`, so `settings.model_name` is still the one
@@ -785,38 +799,273 @@ and do not spend dev time making it work on the 4B.
 
 ---
 
+## Phase 9 — Code generation workspace (`site_gen`) — THE PRIMARY PRODUCT
+
+**Numbered last, built next.** This phase is the product the project is actually for
+(decided 2026-08-31); the high number reflects that it was designed after Phases 0–8 existed, not
+that it comes last. See the execution-order block for the real sequence.
+
+A second, structurally different vertical alongside `ui_ux`: instead of reviewing an existing UI,
+`site_gen` writes a real small project — files on disk the user can browse and preview — from a
+prompt like "build me an e-commerce site". New domain, not a mode inside `ui_ux` (decided
+2026-08-31): `ToolPolicy` is a flat per-domain allowlist with no per-mode scoping, `ui_ux` already
+sits at the measured ~3–5 tool cap, and this pack's write/path-taking tools are a different risk
+class than `ui_ux`'s read-mostly pack — mixing them would retroactively falsify CLAUDE.md's current
+claim that `ui_ux` needs no sandbox. See README's "Adding a domain" checklist; `app/core/` stays
+untouched per CLAUDE.md's invariant #4.
+
+### The product shape (decided 2026-08-31)
+
+```
+User prompt
+  ↓
+[discovery] is there enough context?     ← a skill (M3.1) supplies the question checklist
+  ├─ no  → ask back, return the questions; the client re-sends history next turn
+  └─ yes → pick an output mode:
+       ├─ no framework named → self-contained HTML/CSS/JS
+       └─ framework named    → project files for a Sandpack template
+  ↓
+Files land in the workspace. The FRONTEND renders the preview, not this service.
+  ↓
+User: "that button's colour is wrong"
+  ↓
+Agent: list_directory → read_file → write_file  ← iterative editing, a first-class flow
+```
+
+**This service never builds or runs anything.** No `npm install`, no dev server, no container.
+Preview is the frontend's job via **Sandpack** (CodeSandbox, MIT — no licence fee, and it does not
+need the `Cross-Origin-Embedder-Policy` / `Cross-Origin-Opener-Policy` headers that StackBlitz's
+WebContainer requires, which would otherwise risk breaking the Next.js frontend's third-party
+images, fonts, and analytics). That decision removes M8.3 (sandboxing) from this phase's path
+entirely — see "Decisions settled".
+
+**Sandpack compatibility is an output contract on the agent, not just a frontend detail.**
+Generated files must match a Sandpack template's expected shape (entry point, `package.json`
+dependencies). Verified template list at time of writing: `static`, `vanilla(-ts)`, `react(-ts)`,
+`vue(-ts)`, `svelte`, `solid`, `angular`, `astro`, `nextjs`, `node`, and the `vite-*` variants.
+**`nuxt` is NOT among them** — so **any framework Sandpack cannot render falls back to
+`vite-react`** (decided 2026-08-31), which is the popular default and always renderable. The
+fallback must be stated in the response so the user knows they did not get what they asked for.
+
+**Iterative editing is a first-class v1 flow, not a later addition.** "Fix that button's colour"
+means `list_directory` → `read_file` → `write_file` against an existing workspace. This still
+needs no M4.4 session store: the workspace lives on disk keyed by `project_id`, and conversation
+history is re-sent by the client each turn (see M9.3), so this service stays stateless.
+
+**Ambition is profile-split, not gated all-or-nothing.** Whether `qwen3:4b` can coherently
+sequence a multi-file generation is unmeasured and must be measured (M9.4), not assumed to fail —
+gating the entire phase behind `reliability_tier == "large"` would make it permanently "not done"
+by this project's own rule, since `qwen3.8-27b` is not running anywhere yet (§3: 404 from the
+public Ollama library). Mirrors M6.4's RAG split (pre-fetch for `small`, retriever-as-tool for
+`large`) rather than declaring the feature large-only.
+
+### M9.1 — Workspace primitive
+A `Workspace` class in `app/core/workspace.py` — new shared core infrastructure, not
+domain-specific, mirroring how `app/core/tools/` was built generically in M2.1 before any concrete
+tool existed (and paid off unmodified at M2.4), and how the RAG memory layer is planned the same
+way ("shared machinery... configured per domain by namespace"). Resolves a `project_id` to a root
+directory under a new `Settings.workspace_root` (default `data/projects`). `resolve(relative_path)
+-> Path` normalizes and hard-rejects `..` segments, absolute paths, and symlink escapes
+(`os.path.realpath` checked against the root — never trust `os.path.join` alone). `project_id`
+itself is validated against a strict charset (e.g. `^[a-z0-9_-]{1,64}$`) *before* being joined into
+any path — the traversal risk exists one level above individual file paths too. Mints a fresh
+`project_id` (`uuid.uuid4().hex[:12]`, matching `RunContext.run_id`'s shape) when none is supplied.
+`.gitignore` gains an explicit `data/projects/*` line plus `.gitkeep` — the existing pattern is
+per-subdirectory, not auto-covered.
+**Depends on:** M0.1 (the `Settings` pattern this reuses). No model call, no loop — pure Python,
+unit-testable today, the same way M2.1's `Tool`/`ToolRegistry` were.
+**[4B gap]** None — this milestone has zero model dependency.
+
+### M9.2 — File tools pack
+Three `Tool` subclasses under `app/domains/site_gen/tools/`: `write_file(path, content)`
+(`read_only=False`), `read_file(path)`, `list_directory(path)` (`read_only=True`). Every path
+argument routes through `Workspace.resolve()` before touching the filesystem — no tool constructs
+a `Path` directly. Flat ≤3-param `args_schema` per the M2.1 [4B gap] convention. Schema-shape
+regression tests mirroring `tests/test_ui_ux_tools.py` (≤3 params, no nested objects).
+
+**These same three tools cover editing, not just generation** — "fix that button's colour" is
+`list_directory` → `read_file` → `write_file` with the corrected content. Still deliberately NOT
+shipping `edit_file`/`delete_file`/`move_file`: a diff/patch format is one more thing for the 4B
+to get wrong, and read-then-rewrite is strictly simpler. Revisit only if measured token cost on
+large files makes whole-file rewriting impractical — which is plausible, but unproven, and the
+first components generated will be small.
+**Depends on:** M9.1, M2.1 (`Tool` ABC), M2.3 (`ToolExecutor` — identical execution path to
+`ui_ux`'s pack, no new mechanism needed). Unit-testable now, no loop required — same pattern as
+M2.4.
+**[4B gap]** The first tool pack where M8.3's trigger #2 ("the 4B hallucinates paths, which makes
+traversal reachable") is live on day one, not hypothetical. Live verification against `qwen3:4b`
+must include adversarial prompts attempting `../../`-style escapes, run through the *full*
+`ToolExecutor`, not tested in isolation — mirrors how M2.4's SSRF guard was verified.
+
+### M9.3 — New domain scaffold: `site_gen`
+`app/domains/site_gen/` (`agent.py`, `prompts.py`), one line in `AGENT_REGISTRY`, one router
+(`POST /site-gen/generate`) — the README's 3-step checklist, `app/core/` untouched.
+
+`AgentInput` gains two optional fields, both driven by decisions above:
+- `project_id: str | None` — which workspace to write into. Omitted on the first turn; M9.1 mints
+  one and it comes back on a new `AgentOutput.project_id`. Distinct from the still-dead
+  `session_id`.
+- `history: list[dict] | None` — prior turns, **re-sent by the client each request**. This is what
+  makes both the discovery loop (M9.6) and iterative editing work **without** a server-side
+  session store (M4.4). Chosen deliberately: it keeps this service stateless, which is what
+  CLAUDE.md §1 assumes, and matches how OpenDesign's own BYOK path builds its message list from
+  client-supplied messages.
+
+Scaffolding only — no model call wired yet, matching how M1.1's profile scaffolding preceded any
+real consumer.
+**Depends on:** M1.3 (registry pattern), M9.2 (the tools it will eventually hold).
+**[4B gap]** None yet. Note for M9.4: `history` grows every turn and competes with tool results
+for the 4B's window — M4.1's budgeter owns that trade, not this schema.
+
+### M9.4 — Wire into the loop: generate a new project (dev-tier, scaled ambition)
+Once M5.2 lands, `SiteGenAgent.handle` builds a `ToolRegistry` from M9.2's 3 tools and a
+`ToolPolicy` scoped to exactly those three — never `allow_all`; this is the one domain where an
+over-broad policy has real consequences. A multi-file generation run accumulates far more
+`tool_results` than a 1–2-call review run, so this domain likely needs its own `max_iterations`
+override on top of M5.3's per-profile default, and benefits more than `ui_ux` does from M4.1's real
+per-run budget. Live-verify against `qwen3:4b` first, per this project's standing rule. Whatever the
+4B can coherently produce — even a trivial 2–3-file scaffold — is the dev-tier deliverable; if it
+can't sequence more than 1–2 calls coherently, that is a measured result that scales the dev-tier
+ambition down, not a reason to block the milestone on GPU-server availability.
+**Depends on:** M5.2 (hard gate), M9.2, M9.3. Soft dependency on M4.1/M4.2 for budget headroom on
+longer runs.
+**[4B gap]** Central and deliberately unresolved by architecture: whether `qwen3:4b` can coherently
+sequence a multi-file generation is unmeasured. Both a "yes, trivial scaffold works" and a "no, it
+loses coherence past 2 calls" result are acceptable, measured outcomes — not failure states.
+
+### M9.5 — Iterative editing of an existing workspace
+The "fix that button's colour" flow, and the reason `read_file`/`list_directory` exist at all.
+The agent is given an existing `project_id` plus the client's `history`, and must *rediscover*
+what is already there rather than assume it — `list_directory` to find the component,
+`read_file` to see the current colour, `write_file` with the corrected content.
+
+Two things this milestone must actually prove, not assume:
+1. **The model edits rather than regenerates.** A small model's failure mode here is rewriting the
+   whole project from scratch on every follow-up, silently discarding earlier work. Measure it.
+2. **The workspace is the source of truth, not the history.** If `history` and the files disagree
+   (user edited a file themselves, or an earlier write partially failed), the files win.
+**Depends on:** M9.4, M9.3 (`history` on `AgentInput`). No M4.4 — the workspace on disk plus
+client-sent history is the whole state model.
+**[4B gap]** Whole-file rewriting costs input tokens on read and output tokens on write, for the
+same file. On a 32K window with several hundred tokens burned on reasoning, this caps how large an
+editable file can be — measure the ceiling instead of guessing it, and let that number decide
+whether `edit_file` (M9.2's deferred tool) ever becomes necessary.
+
+### M9.6 — Discovery: ask before generating
+When the prompt is under-specified ("build me an e-commerce site"), the agent should ask back
+instead of inventing an answer: which framework, what visual style, what pages. The question set
+comes from a **skill** (M3.1) — a checklist is exactly what Phase 3 defines a skill to be — not
+from the model's improvisation, and not from RAG.
+
+The turn ends by *returning the questions*; the client re-sends `history` with the user's answers
+on the next request (M9.3). No server-side session state.
+
+Note the interaction with the `vite-react` fallback: because an unsupported framework degrades to
+a renderable default rather than failing, asking about the framework is an *improvement*, not a
+precondition. Ask about style and scope, where there is no sensible default.
+**Depends on:** M9.4, M3.1 (the skill mechanism), M9.3 (`history`).
+**[4B gap]** A question-asking turn is a *terminal state that is not an answer* — M5.2's loop must
+treat it as success, the same way it already treats `NoToolCall`. Do not let it look like a
+failed run. Also cap the question count: the 4B will happily ask eight questions where two matter.
+
+### M9.7 — Large-tier generation ambition (prod-only stretch)
+Extends generation ambition for `reliability_tier == "large"` to real multi-page/multi-component
+output, likely via M5.4's planner strategy (plan the file list, then execute writes) rather than
+raw ReAct — laying out an unfamiliar multi-file structure resembles M5.4's "multi-part audit"
+planning problem more than a single tool call.
+**Depends on:** M9.4, M5.4. Also depends on infrastructure that does not exist yet.
+**Status: BLOCKED**, not merely "not started" — `qwen3.8-27b` is not pulled or served anywhere (see
+§3); this milestone cannot be attempted until that infrastructure exists, independent of engineering
+readiness. Same distinction already used for the missing RAG embedding model under "Still open."
+**[4B gap]** Not applicable — large-only by definition; do not attempt on the 4B (same phrasing as
+M5.4).
+
+### M9.8 — Reflect this pack in M8.2 / M8.3 (docs-only)
+Add `write_file`/`read_file`/`list_directory` to M8.2's future capability declarations
+(`{"fs_write"}` / `{"fs_read"}` / `{"fs_read"}`) — pre-specified the same way `fetch_docs`'s
+`{"network"}` was written before M8.2 existed. Update M8.3 triggers #2 and #4 to name this pack as
+the concrete instance firing them, mitigated today by M9.1's workspace-root path sandbox — the same
+"tool-local mitigation now, formalize at M8.2 later" pattern already used for `fetch_docs`'s SSRF
+guard, not a new precedent. Correct trigger #4's wording if `workspace_root` ends up outside
+`data/`.
+**Depends on:** M9.2, M8.2/M8.3 (the sections being edited already exist).
+**[4B gap]** N/A — docs-only.
+
+---
+
 ## Suggested execution order
 
-**Phase numbers are conceptual; this block is the build order.** Phase 3 (Skills) is the one place
-they diverge — see the note under "Dependency overview".
+**Phase numbers are conceptual; this block is the build order, and the two diverge on purpose.**
+Reprioritised 2026-08-31 (see "Decisions settled" below): **`site_gen` — generating a real project
+from a prompt — is the primary product**, so the build order is now the shortest path to a working
+generation run, not the shortest path to a polished reviewer.
 
 ```
-[x] M0.1 → M0.2 → M0.3 → M0.4 → M0.5   (service boots — DONE)
-[x] M1.1 → M1.2 → M1.3 → M1.4 → M1.5    (Phase 1: runtime — DONE. M1.2 retry skipped by decision;
-                                          M1.5's JSONL persistence deferred to M7.2 by decision)
-[x] M2.1 → M2.2 → M2.3                  (tool format frozen — hard gate for the loop.
-                                          ALL THREE DONE. M2.4 unblocked, still not started)
-    M4.1 → M4.2 → M4.3 → M4.4           (context budget)
-    M5.1 → M5.2 → M5.3                  (loop; M5.4 optional, prod only)
-    M6.1 → M6.2 → M6.3 → M6.4 → M6.5    (RAG)  [M6.1 can start early, in parallel]
-    M3.1 → M3.2                         (skills; M3.2 needs M4.1 + M4.2, so after Phase 4)
-    M2.4 lands after M6.4.
-    M3.3 lands after M2.4 (tool packs generalize from one real pack)
-    M7.1 → M7.2 → M7.3 → M7.4 → M7.5 → M7.6   (fine-tuning)
-    M8.1 → M8.2 → [M8.3 only if a trigger fires] → M8.4   (hooks, permissions, sub-agents LAST)
+DONE
+[x] M0.1 → M0.2 → M0.3 → M0.4 → M0.5     (service boots)
+[x] M1.1 → M1.2 → M1.3 → M1.4 → M1.5     (runtime. M1.2 retry skipped by decision;
+                                           M1.5's JSONL persistence deferred to M7.2)
+[x] M2.1 → M2.2 → M2.3 → M2.4            (tools. Tool-call format frozen — the loop's hard gate)
+
+CRITICAL PATH — the shortest route to "type a prompt, get generated files, see them rendered"
+    M4.1 → M4.2                          (budgeter, then assembly — M5.1/M5.2 need both)
+    M5.1 → M5.2                          (loop. M5.2 is where the Phase 2 tool layer is finally
+                                           used by anything at all)
+    M9.1 → M9.2 → M9.3 → M9.4            (workspace → file tools → domain → wire into the loop)
+    M9.5                                 (iterative editing — "fix that button's colour". Needed
+                                           for the product to be usable, not a later nicety)
+
+THEN — makes it good rather than merely working
+    M3.1 → M9.6                          (skill mechanism, then the discovery/ask-back turn.
+                                           Skill CONTENT starts from OpenDesign's design-pattern
+                                           SKILL.md files — Apache-2.0, attribution required)
+    M3.2                                 (rule-based skill selection, once there are several)
+
+PARALLEL — no model, no loop, no dependency on the critical path
+    M9.1, M9.2                           (pure Python + unit tests; build these if Phase 4 stalls)
+    M6.1                                 (corpus definition is writing, not code — and it is the
+                                           milestone that answers "what would RAG even index?",
+                                           which is currently unknown. Until it has an answer,
+                                           M6.2-M6.4 must not start)
+
+ADD WHEN MEASURED, NOT BEFORE
+    M4.3                                 (compaction. NOT a hard dependency of M5.2 — M2.3 already
+                                           caps each tool result at 2000 chars. Add it when a real
+                                           multi-file run is measured blowing the window, which is
+                                           likely but unproven)
+    M5.3                                 (per-profile loop policy — needs two profiles worth
+                                           caring about; today only the 4B actually runs)
+
+DEFERRED — not cancelled, just not next.
+    M6.2 → M6.3 → M6.4 → M6.5            (RAG — blocked on M6.1 having an answer first)
+    M3.3                                 (tool packs)
+    M7.1 → ... → M7.6                    (fine-tuning)
+    M8.1 → M8.2                          (hooks, permission layer)
+    M4.4                                 (session store — NOT needed: the workspace is on disk and
+                                           the client re-sends history, so this service stays
+                                           stateless through both discovery and editing)
+
+NO LONGER ON ANY PATH
+    M8.3                                 (sandboxing. This service never builds or runs generated
+                                           code — Sandpack renders it in the user's browser — so
+                                           trigger #1 never fires. Path traversal, trigger #2, is
+                                           handled by M9.1's workspace guard)
+
+BLOCKED ON INFRASTRUCTURE, NOT ENGINEERING
+    M9.7, M5.4, M8.4                     (all need qwen3.8-27b, which is not running anywhere)
+    M6.3                                 (needs an embedding model this runner does not have)
 ```
 
-**Phase 1 (Runtime) is fully done, and Phase 2 is done through M2.3 — definition, parsing, and
-execution policy all exist and are tested.** Next up: **M2.4 (the first real tool pack)** — it now
-has everything it depends on, though the ROADMAP suggests landing it after M6.4 so the
-design-token lookup tool can be RAG-backed instead of hardcoded.
+**Phases 0–2 are fully done.** Next up is the critical path above: **M4.1 → M4.2 → M4.3 →
+M5.1 → M5.2**, then Phase 9.
 
 Nothing calls `ToolCallResolver` or `ToolExecutor` yet: wiring them into an agent is the loop's
 job (M5.1/M5.2), and doing it earlier would mean writing a mini-loop inside `UIUXAgent` and then
-deleting it.
+deleting it. **M5.2 is the milestone where the entire Phase 2 tool layer finally gets used.**
 
-**M3.1 (skill loading) is the one item that can be picked up out of order** — it depends only on
-M2.1 and M1.3, both done, and it is a self-contained registry. Useful if Phase 4 stalls.
+**M9.1 and M9.2 can be picked up at any time, in parallel with Phase 4** — the workspace primitive
+and the file tools need no model and no loop, exactly like M2.1 and M2.4 didn't. If Phase 4 stalls,
+build those.
 
 **Decisions settled (2026-08-29) — do not re-ask:**
 - **Prod model tag: `qwen3.8-27b`.** Verified the same day: it 404s from the public Ollama library,
@@ -835,10 +1084,52 @@ M2.1 and M1.3, both done, and it is a self-contained registry. Useful if Phase 4
   Phase 8. Phase 1 was renamed Runtime, and Phases 3–6 were renumbered to 4–7 to open the slot.
   **The renumber touched no shipped code identifiers** — everything built so far lives in M0/M1/M2,
   which kept their numbers — so git history and commit messages remain accurate.
-- **No sandbox for the `ui_ux` tool pack.** See M8.2's assessment and M8.3's trigger list.
+- **No sandbox for the `ui_ux` tool pack** *except `fetch_docs`* — see M8.2's revised assessment
+  and M8.3's trigger list.
 - **Sub-agents are last (M8.4), not early.** Isolated rebuilt context, subset permissions, and
   structured-summary returns are the constraints that make them expensive; the loop must be stable
   on one domain first.
+- **`site_gen` (Phase 9) is the primary product; the build order was reprioritised around it.**
+  This ROADMAP was originally written when `ui_ux` *review* was the product, so its build order put
+  RAG (5 milestones) and fine-tuning (6) — both of which exist to make **review** better — ahead of
+  Phase 9. Neither is needed to generate a project from a prompt. The critical path is now
+  `M4.1 → M4.2 → M5.1 → M5.2 → M9.1 → M9.2 → M9.3 → M9.4` (8 milestones instead of ~25 to a
+  working product). RAG, skills, fine-tuning, and hooks are **deferred, not cancelled** — `ui_ux`
+  review remains a real domain and those milestones still describe how to make it good.
+  **Do not re-derive this ordering from phase numbers** — the numbers reflect conceptual layering,
+  the execution-order block reflects what to build next.
+- **Preview is Sandpack, in the user's browser — this service never builds or runs anything.**
+  No `npm install`, no dev server, no container, no GPU/CPU cost per preview. Sandpack (CodeSandbox)
+  is MIT and needs no cross-origin-isolation headers. StackBlitz's **WebContainer was rejected**:
+  it requires a **commercial licence for production**, and its mandatory
+  `Cross-Origin-Embedder-Policy: require-corp` + `Cross-Origin-Opener-Policy: same-origin` headers
+  risk breaking third-party images, fonts, and analytics on the Next.js frontend. Revisit only if
+  a framework Sandpack cannot render becomes a real requirement.
+- **Unsupported frameworks fall back to `vite-react`.** Sandpack has no `nuxt` template. Rather
+  than fail or half-support, generate the popular default and **say so in the response** — the user
+  must know they did not get what they asked for. Verified Sandpack templates: `static`,
+  `vanilla(-ts)`, `react(-ts)`, `vue(-ts)`, `svelte`, `solid`, `angular`, `astro`, `nextjs`,
+  `node`, `vite-*`.
+- **Two output modes:** no framework named → self-contained HTML/CSS/JS (renders in a bare
+  iframe, zero dependencies); framework named → project files shaped for a Sandpack template.
+- **Iterative editing is v1, not a later phase.** "Fix that button's colour" is the core loop, and
+  it needs no new tools beyond M9.2's three and no session store — the workspace on disk plus
+  client-re-sent `history` is the entire state model.
+- **Skill content starts from OpenDesign's `SKILL.md` files.** Verified **Apache-2.0, no NOTICE
+  file** — reuse and modification are permitted with a licence copy, attribution, and a statement
+  of changes. They ship 533 of them under `design-templates/`, and the frontmatter shape
+  (`name`/`description`/`triggers` + body) matches M3.1's design almost exactly. **Do not import
+  all 533** — M3.2's cap is 1–2 skills for the `small` tier; select a handful and trim each to
+  ≤300 tokens.
+- **RAG waits until M6.1 has an answer.** What to index is currently unknown, and M6.1 is exactly
+  the milestone that decides it. Building retrieval before knowing the corpus would be guessing
+  twice. Skills may cover enough of the "what style, what pattern" need that RAG is less urgent
+  than first assumed.
+- **The eventual "run on the user's machine like Claude Code" direction will break CLAUDE.md §1.**
+  That section's load-bearing claim is that this service sits behind a Go gateway and is not
+  publicly reachable, which is what justifies having no auth, no rate limiting, and no CORS here.
+  A local-process deployment invalidates all three premises. Nothing to do now — Phase 9 v1 is
+  server-side — but whoever starts that pivot must revisit §1 first, not discover it midway.
 
 **Still open:**
 - An embedding model for RAG — `/api/embed` is unavailable on the current runner (needed by M6.3).
@@ -864,6 +1155,11 @@ M2.1 and M1.3, both done, and it is a self-contained registry. Useful if Phase 4
   **Do not build this speculatively.** If it becomes a real requirement: design the multimodal
   tool-result path first (as its own milestone, likely adjacent to M8.x), gate the tool behind
   `model_profile.supports_vision`, and verify on the 27B — not on `qwen3:4b`, which cannot run it.
+- **Phase 9's project workspace has no lifecycle story.** No cleanup/quota for abandoned
+  `data/projects/<id>/` directories, and no user/tenant scoping of `project_id` — there is no
+  consuming auth model today to scope it to (see CLAUDE.md §1: per-user context, if ever needed,
+  arrives as a gateway-injected header, not something this service tracks itself). Both named,
+  neither built — same "don't build until a trigger fires" posture as M8.3.
 
 ---
 
