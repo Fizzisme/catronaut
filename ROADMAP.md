@@ -566,6 +566,26 @@ slot truncates mid-reasoning into an empty answer (observed), not a short one.
 `run.token_budget` on every request. Nothing reads the slots yet — M4.2's assembly pipeline and
 M4.3's truncation are the first real consumers — but the field is no longer always `None`.
 
+**Slot ownership clarified for the loop (asked and answered before M5.2 exists, so the
+milestone starts unambiguous):** `tool_results` is the CURRENT run's own ReAct scratchpad — the
+`assistant(tool_calls) + tool(result)` pairs a single run accumulates across M5.2's loop
+iterations — not `history`, and not `reserved_output` once a response has been received (that
+slot is re-guaranteed fresh every iteration per M5.2's "every iteration re-runs the budgeter",
+sized for the response about to be generated, not output already in hand). `history` is prior
+*requests'* turns, re-sent by the client (M4.4 stateless). M4.2's message order names two
+sub-segments — `(summarized history)` then `recent turns` — but they are one budget pool over
+the compaction lifecycle (M4.3 folds dropped `recent_turns` into the `summarized_history`
+message), not two independently-sized slots — **there is deliberately no separate
+`recent_turns` slot.** Documented in `token_budget.py`'s module docstring and `TokenBudget`'s
+field comments, not just here.
+
+**Flagged, not fixed: `tool_results` at 0.15 is unverified against real loop numbers.** At the
+dev-default 4096-token window that's ~614 tokens, and M2.3's 2000-char per-result truncation cap
+(already a placeholder) eats ~575 of those in ONE result — with M5.2's planned 2-3 max
+iterations on the 4B, this slot will likely trigger M4.3 truncation almost every loop. Re-tune
+this fraction together with M4.3/M5.2 once a real loop exists to measure against; do not
+hand-tune it blind now.
+
 8 new tests in [tests/test_token_budget.py](../tests/test_token_budget.py) (86 total): empty-text
 count, the overestimate math, a Vietnamese-text regression proving the byte-based count exceeds
 what a codepoint-based one would give, the effective-window clamp in both directions, slot sum ≤

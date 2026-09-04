@@ -5,6 +5,22 @@ Nothing consumes the slot values yet — M4.2's assembly pipeline and M4.3's tru
 strategy are the first callers, and M6.4 (RAG injection) blocks on this existing. See
 ROADMAP M4.1. `RunContext.token_budget` is populated eagerly by `Agent._new_run_context`
 so those milestones have something to read from day one.
+
+Two axes that are easy to conflate — see `TokenBudget`'s field docs for which slot owns
+which:
+- **`tool_results`** is the CURRENT run's own ReAct scratchpad (M5.2): the
+  `assistant(tool_calls) + tool(result)` pairs that accumulate as one run's loop iterates.
+  `reserved_output` is deliberately NOT a place to keep this — it is re-guaranteed fresh
+  before every iteration (M5.2: "every iteration re-runs the budgeter"), sized for the
+  response about to be generated, not for output already received. Once a response is in
+  hand it stops being "reserved" and becomes consumed context for the next call, so it
+  moves into `tool_results`.
+- **`history`** is PRIOR requests' conversation turns, re-sent by the client each call
+  (M4.4: this service is stateless). M4.2's message order names two sub-segments within
+  this one pool — `(summarized history)` then `recent turns` — but they are two
+  representations of the same budget over the compaction lifecycle (M4.3: oldest
+  `recent_turns` get folded into the `summarized_history` message once over budget), not
+  two independently-sized slots. There is deliberately no separate `recent_turns` slot.
 """
 
 import math
@@ -30,6 +46,14 @@ _SAFETY_MARGIN = 1.15
 # Reserved output gets the largest single share on purpose: CLAUDE.md's measured behaviour
 # on qwen3:4b is that it always reasons regardless of `think`, and a tight num_predict
 # truncates mid-reasoning into an empty answer (observed) rather than a short one.
+#
+# tool_results at 0.15 is UNVERIFIED against real multi-iteration loop numbers: at the dev
+# default (4096-token effective window) that's ~614 tokens, and M2.3's per-tool-result
+# truncation cap (2000 chars, itself a placeholder pending this milestone) already eats
+# ~575 of those in ONE result. With M5.2's planned max_iterations of 2-3 on the 4B, this
+# slot is likely to trigger M4.3 truncation almost every loop. Re-tune this fraction
+# together with M4.3/M5.2 once a real loop exists to measure against — don't hand-tune it
+# blind now.
 _RESERVED_OUTPUT_FRACTION = 0.30
 _HISTORY_FRACTION = 0.30
 _SYSTEM_FRACTION = 0.10
@@ -42,7 +66,13 @@ class TokenBudget:
     total: int
     system: int
     retrieved_context: int
+    # Prior requests' conversation turns (client re-sent, M4.4 stateless). Covers both
+    # not-yet-compacted recent turns and the rolling summary M4.3 folds them into — one
+    # pool, not two slots. See the module docstring.
     history: int
+    # The CURRENT run's own ReAct scratchpad (M5.2): assistant(tool_calls) + tool(result)
+    # pairs accumulated across this run's loop iterations. NOT prior-request history, and
+    # NOT reserved_output once a response has been received. See the module docstring.
     tool_results: int
     reserved_output: int
 
