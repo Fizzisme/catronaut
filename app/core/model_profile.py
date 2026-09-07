@@ -54,8 +54,21 @@ _PROFILES: dict[str, ModelProfile] = {
         tool_call_style="prompt",
         reliability_tier="small",
     ),
-    # Prod target (decided 2026-08-29). Not in the public Ollama library as of that date —
-    # needs a Modelfile / private registry on the GPU server. See CLAUDE.md §3.
+    # Prod target (decided 2026-08-29). NOT a Qwen3 variant — Qwen3.8 is a newer generation
+    # built on Qwen3.5's architecture, so do not reason about it by analogy with `qwen3:4b`.
+    #
+    # Every field below is CONFIRMED against the official model card, kept at
+    # docs/qwen3.8-27b-reference.md (verified 2026-09-08):
+    #   context_window        262,144 native ("extensible to 1,000,000" via YaRN — raise this
+    #                         number only when YaRN is actually configured on the server, since
+    #                         the budgeter now treats it as the real window)
+    #   supports_vision       native vision-language: images AND video
+    #   supports_native_tools benchmarked through agentic tool-calling harnesses
+    #   tool_call_style       serves an OpenAI-compatible Chat Completions API
+    #
+    # Still not in the public Ollama library (checked 2026-08-29) — and the card recommends
+    # vLLM / SGLang / TokenSpeed, not Ollama, so prod likely needs a second ModelProvider
+    # rather than a Modelfile. See ROADMAP M1.6.
     "qwen3.8-27b": ModelProfile(
         name="qwen3.8-27b",
         context_window=262_144,

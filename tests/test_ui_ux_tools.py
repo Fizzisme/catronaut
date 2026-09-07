@@ -51,14 +51,22 @@ def test_every_tool_declares_read_only():
         assert isinstance(tool.read_only, bool)
 
 
-def test_schemas_stay_flat_no_nested_objects(): # 4B gap: flat args, ROADMAP M2.1
+# The next two tests encode a SMALL-TIER convention, not a permanent rule for every model
+# (ROADMAP M2.1 [4B gap]). `qwen3:4b` picks the wrong tool as schemas get wider, so this pack
+# — which must stay runnable as a local smoke test — keeps its arguments flat and few. They
+# are not a claim that `qwen3.8-27b` needs the same restraint: it does not, and a future pack
+# targeting it may legitimately want richer schemas. When that happens, scope these
+# assertions to the small tier rather than deleting them; do not silently widen this pack.
+# See CLAUDE.md §3 on which model this project is judged against.
+
+def test_schemas_stay_flat_no_nested_objects():
     registry = ToolRegistry(TOOLS)
     for schema in registry.schema():
         for prop in schema["parameters"].get("properties", {}).values():
             assert prop.get("type") != "object", schema["name"]
 
 
-def test_every_tool_has_at_most_three_params():  # 4B gap cap, ROADMAP M2.1
+def test_every_tool_has_at_most_three_params():
     registry = ToolRegistry(TOOLS)
     for schema in registry.schema():
         assert len(schema["parameters"].get("properties", {})) <= 3, schema["name"]

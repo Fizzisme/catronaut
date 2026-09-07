@@ -8,6 +8,7 @@ from app.core.exceptions import ProviderError
 from app.core.model_profile import get_model_profile
 from app.core.model_provider.base import ModelProvider, RunUsage
 from app.core.model_provider.ollama_provider import OllamaProvider
+from app.domains.registry import AGENT_REGISTRY
 from app.main import app
 
 
@@ -93,6 +94,17 @@ def test_unknown_domain_is_404(client):
 
     with pytest.raises(UnknownDomainError):
         client.app.state.orchestrator.get_agent("nope")
+
+
+def test_every_registered_agent_declares_reserved_output_tokens():
+    """`Agent.reserved_output_tokens` has no default, on purpose (ROADMAP M4.1) — what a
+    response needs is a property of the task, not the framework. Forgetting it is a quiet
+    failure like `Tool.read_only`: the class imports fine and only breaks at `_plan_budget`,
+    so guard it here the same way the tool pack guards `read_only`."""
+    for domain, agent_cls in AGENT_REGISTRY.items():
+        tokens = getattr(agent_cls, "reserved_output_tokens", None)
+        assert isinstance(tokens, int), f"{domain} does not declare reserved_output_tokens"
+        assert tokens > 0, f"{domain} reserved a non-positive output budget"
 
 
 # --- provider response normalization ---------------------------------------

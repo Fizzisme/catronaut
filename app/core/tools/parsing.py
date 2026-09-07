@@ -185,11 +185,14 @@ def validate_call(candidate: dict[str, Any], registry: ToolRegistry) -> ParseRes
 def _summarize(exc: ValidationError) -> str:
     """A one-line summary of a pydantic error.
 
-    It is fed back to the model for its single repair turn, and on the 4B every token
-    of it competes with the actual task, so at most two problems are reported.
+    It is fed back to the model for its single repair turn. Every problem is reported: an
+    earlier version capped this at two on the grounds that "on the 4B every token competes
+    with the task", but a repair turn that hides half the errors invites a second failure
+    for a saving of a few dozen tokens — a bad trade on any window, and a meaningless one on
+    the 27B this project targets (CLAUDE.md §3).
     """
     parts = []
-    for error in exc.errors()[:2]:
+    for error in exc.errors():
         field = ".".join(str(item) for item in error["loc"]) or "(root)"
         parts.append(f"{field}: {error['msg']}")
     return "; ".join(parts)

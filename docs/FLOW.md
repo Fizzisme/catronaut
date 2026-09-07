@@ -133,7 +133,7 @@ async def lifespan(app: FastAPI):
     model_provider = OllamaProvider(
         base_url=settings.ollama_base_url,
         model_name=settings.model_name,
-        num_ctx=settings.model_num_ctx,
+        num_ctx=settings.effective_num_ctx,
         timeout_s=settings.model_timeout_s,
         think=settings.model_think,
     )

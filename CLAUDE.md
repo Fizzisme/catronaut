@@ -113,6 +113,15 @@
   to *constrain* a local box. And `ToolExecutor`'s flat 2000-char cap became
   `max_result_bytes`, derived from the live budget's `available` — ROADMAP M2.3 had named M4.1
   as that number's owner. Truncation is byte-wise so it never splits a Vietnamese character.
+- **⚠ NEW 2026-09-08 — `M1.6` (OpenAI-compatible provider) exists and blocks all prod work.**
+  Reading the prod model's card revealed `qwen3.8-27b` is served by **vLLM / SGLang over an
+  OpenAI-compatible Chat Completions API, not Ollama** — and `OllamaProvider` is our only
+  backend. The old plan of record ("needs a Modelfile / private registry") was inferred from
+  Ollama being all we had, not from anything the model says. M1.6 is **buildable and testable
+  now**, before the GPU box exists, and M9.7 / M5.4 / M8.4 are blocked on it as much as on
+  hardware. Two related findings recorded, not built: `reserved_output_tokens` is 4B-sized and
+  wrong for prod by orders of magnitude (→ M5.3), and `preserve_thinking` makes `history` carry
+  hidden reasoning tokens (→ M4.2).
 - **Next up:** **M4.2 (message assembly pipeline)** — the next item on the critical path;
   M5.1/M5.2 both need it. Decided for M4.2: build only the segments whose shape is frozen
   (`system` / `history` / `current_input` / `tool_results`), leave `retrieved_context` and
@@ -201,8 +210,27 @@ Invariants the code honors — **keep these**:
 
 **On the prod tag:** `qwen3.8-27b` is the decided target. Verified 2026-08-29: it returns **404
 from the public Ollama library** (`registry.ollama.ai/v2/library/qwen3.8-27b`), so it cannot be
-`ollama pull`-ed as-is — it will need a Modelfile or a private registry on the GPU server. Set it
-via `MODEL_NAME`; nothing hardcodes it.
+`ollama pull`-ed as-is. Set it via `MODEL_NAME`; nothing hardcodes it.
+
+**⚠ Its official model card lives at [docs/qwen3.8-27b-reference.md](docs/qwen3.8-27b-reference.md)
+— read it before reasoning about prod behaviour, and do not infer prod behaviour from `qwen3:4b`.**
+`Qwen3.8` is a **new generation** built on Qwen3.5's architecture, **not** a Qwen3 variant. Facts
+that matter here and that family-resemblance guesses got wrong:
+- **262,144 native context, extensible to 1,000,000 via YaRN.** The `_PROFILES` entry carries the
+  native number; only raise it when YaRN is actually configured server-side, because M4.1's
+  budgeter now treats `context_window` as the real window.
+- **Thinking is ON by default**, emitted as *properly delimited* `<think>…</think>` — documented
+  behaviour, not the 4B's bare-closing-tag defect. Depth is tunable via **`reasoning_effort`**
+  (`xhigh` default / `medium` / `low`), and **`preserve_thinking` is on by default**, retaining
+  thinking blocks from *all* prior messages.
+- **Output guidance for agentic tasks: reasoning up to 262,144 tokens, final response up to
+  131,072.** Our `reserved_output_tokens` values were sized from 4B measurements and are almost
+  certainly far too small for this model — see ROADMAP M5.3.
+- **Serving is vLLM / SGLang / TokenSpeed over an OpenAI-compatible Chat Completions API.** The
+  card never mentions Ollama. Prod likely needs a second `ModelProvider`, not a Modelfile — that
+  is ROADMAP **M1.6**, and it blocks every "needs the 27B" milestone.
+- Its token embedding is **248,320 (padded)** — a different tokenizer from Qwen3's, which is why
+  bundling a Qwen3 tokenizer for counting would be wrong, not merely imprecise.
 
 ### Measured behaviour of `qwen3:4b` (tested, not assumed)
 
@@ -394,6 +422,17 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 - **Token budget is measured, not apportioned** (M4.1, reworked 2026-09-07). No fractions. The
   fraction model wasted 52k tokens on a 262k window for a 473-token real need — its error grows
   with the window, which is backwards for a 27B target. Do not reintroduce percentage slots.
+- **Phases 0–2 were swept for 4B constants on 2026-09-08 — done, don't redo it.** Removed:
+  `fetch_docs`'s silent 4000-char output cap and `_summarize`'s two-error cap on the repair turn.
+  Re-scoped: M2.1's ≤3-params rule is now labelled a *small-tier convention*, and the CI tests
+  say so. **Kept on purpose** (not model accommodations): `_MAX_DOWNLOAD_BYTES` (DoS guard),
+  `Tool.timeout_s`, `MODEL_TIMEOUT_S`, `_LEAKED_THINK` (kept because it handles **two different**
+  shapes — see §3; the audit's first claim that both models share one "Qwen3-family bug" was
+  wrong), and `_DEFAULT_PROFILE`'s 4096 fallback —
+  though note an **unregistered** model tag now silently runs at 4096, so add a `_PROFILES` entry
+  when pointing `MODEL_NAME` somewhere new. Left alone by decision: `lookup_heuristic`'s enum
+  (M6.4 deletes that tool) and the terse `SYSTEM_PROMPT` (a prompt-quality question, tied to the
+  unowned "system prompt composition" item).
 - Prod model tag: **`qwen3.8-27b`**. Needs a Modelfile / private registry (see §3).
 - Postgres: **coming later**, on the GPU server; a Neon URL is the likely first form.
   Stays commented in `.env.example` until ROADMAP M4.4.
