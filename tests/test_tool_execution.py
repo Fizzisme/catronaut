@@ -74,9 +74,21 @@ class _BigTool(Tool):
         return "x" * 5000
 
 
+class _VietnameseTool(Tool):
+    name = "vietnamese"
+    description = "Returns multibyte text, to exercise byte-wise truncation."
+    args_schema = _EchoArgs
+    read_only = True
+
+    async def run(self, args: _EchoArgs) -> str:
+        return "Đây là một chuỗi tiếng Việt dài có dấu " * 20
+
+
 @pytest.fixture
 def registry():
-    return ToolRegistry([_EchoTool(), _WriteTool(), _SlowTool(), _BrokenTool(), _BigTool()])
+    return ToolRegistry(
+        [_EchoTool(), _WriteTool(), _SlowTool(), _BrokenTool(), _BigTool(), _VietnameseTool()]
+    )
 
 
 @pytest.fixture
@@ -139,14 +151,66 @@ async def test_a_tool_exception_never_escapes_the_executor(registry, run):
 
 @pytest.mark.asyncio
 async def test_oversized_result_is_truncated(registry, run):
+    # No budget planned on this run -> the fallback constant applies (M4.1).
     policy = ToolPolicy.allow_all(registry)
-    executor = ToolExecutor(registry, policy, max_result_chars=100)
+    executor = ToolExecutor(registry, policy, max_result_bytes=100)
 
     result = await executor.execute(run, _call("big"))
 
     assert result.truncated is True
     assert len(result.output) <= 100 + len("\n...[truncated]")
     assert result.output.endswith("[truncated]")
+
+
+@pytest.mark.asyncio
+async def test_truncation_uses_the_planned_budget_when_there_is_one(registry, run):
+    """The M4.1 hand-off: a big window must not be capped by the fallback constant.
+
+    ROADMAP M2.3 shipped a flat 2000-char cap and named M4.1 as the number's real owner.
+    With a budget on the run, the limit follows `available` instead — which is what keeps a
+    `read_file` result intact on a large-window model.
+    """
+    policy = ToolPolicy.allow_all(registry)
+    executor = ToolExecutor(registry, policy, max_result_bytes=100)
+    run.token_budget = {"available": 100_000}
+
+    result = await executor.execute(run, _call("big"))
+
+    assert result.truncated is False
+    assert "[truncated]" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_over_budget_run_falls_back_to_the_constant(registry, run):
+    # available <= 0 means the run is already over budget; dropping accumulated results is
+    # M4.3's job, so the executor trims to the fallback rather than emptying the result.
+    policy = ToolPolicy.allow_all(registry)
+    executor = ToolExecutor(registry, policy, max_result_bytes=100)
+    run.token_budget = {"available": 0}
+
+    result = await executor.execute(run, _call("big"))
+
+    assert result.truncated is True
+    assert len(result.output) <= 100 + len("\n...[truncated]")
+
+
+@pytest.mark.asyncio
+async def test_truncation_never_splits_a_multibyte_character(registry, run):
+    """Trimming by UTF-8 bytes must not leave half a Vietnamese character behind.
+
+    `count_tokens` measures bytes, so the cap is in bytes — but slicing a `str` by
+    characters could still overflow it, and slicing bytes naively could cut mid-character.
+    """
+    policy = ToolPolicy.allow_all(registry)
+    executor = ToolExecutor(registry, policy, max_result_bytes=25)
+    run.token_budget = None
+
+    result = await executor.execute(run, _call("vietnamese"))
+
+    assert result.truncated is True
+    body = result.output[: -len("\n...[truncated]")]
+    assert len(body.encode("utf-8")) <= 25
+    body.encode("utf-8").decode("utf-8")  # must not raise: no dangling partial character
 
 
 @pytest.mark.asyncio

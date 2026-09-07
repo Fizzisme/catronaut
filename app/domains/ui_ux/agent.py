@@ -11,6 +11,13 @@ logger = logging.getLogger(__name__)
 class UIUXAgent(Agent):
     domain = "ui_ux"
 
+    # A review is prose: a few hundred tokens of feedback, plus the several hundred this
+    # model family burns reasoning inline before answering (CLAUDE.md §3 measured 646
+    # tokens for one such answer with `think: false`). Sized for the task, not the window —
+    # on a 262k-token model this never binds; on a 4k one it is what stops the prompt
+    # crowding out the answer.
+    reserved_output_tokens = 1500
+
     async def handle(self, input: AgentInput) -> AgentOutput:
         run = self._new_run_context()
         logger.info("run_id=%s domain=%s start", run.run_id, run.domain)
@@ -32,6 +39,10 @@ class UIUXAgent(Agent):
             # Ollama's multimodal message format.
             user_message["images"] = [input.image_base64]
         messages.append(user_message)
+
+        # No tools are registered for this domain yet (M5.1/M5.2 wire the pack in), so
+        # `tool_schema` is empty here — it stops being empty the moment the loop lands.
+        self._plan_budget(run, system=SYSTEM_PROMPT, current_input=input.prompt)
 
         raw = await self.model_provider.chat(messages=messages)
         content = self.model_provider.extract_content(raw)

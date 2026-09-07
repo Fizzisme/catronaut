@@ -26,9 +26,10 @@ class RunContext:
     # Set by Agent._build_output once the model call completes (ROADMAP M1.5).
     usage: RunUsage | None = None
 
-    # Set by Agent._new_run_context via app.core.token_budget.allocate_budget (ROADMAP M4.1).
-    # Nothing reads the slots yet — M4.2's assembly pipeline and M4.3's truncation are the
-    # first consumers.
+    # Set by Agent._plan_budget before EVERY model call, not once per run (ROADMAP M4.1):
+    # M5.2's loop grows the tool-result tail each iteration, so a budget planned at run
+    # start is stale by the second call. `None` until the first call is planned.
+    # `ToolExecutor` already reads `available` off this to size result truncation.
     token_budget: dict | None = None
 
     # Populated by later milestones. Present now so those milestones extend one object

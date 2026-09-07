@@ -373,7 +373,9 @@ call)` takes an already-validated `ToolCall` (M2.2) and always returns a `ToolEx
 (denied / timed out / errored / succeeded), never a raised exception and never an unbounded
 string. In order: (1) allowlist check via `ToolPolicy`, (2) `tool.run(args)` under
 `asyncio.wait_for(timeout=tool.timeout_s)`, (3) any exception from the tool itself is caught, (4)
-the result string is truncated at `max_result_chars` (default 2000) with a `[truncated]` marker.
+the result string is truncated with a `[truncated]` marker — originally at a flat
+`max_result_chars=2000`, now byte-wise at whatever the live M4.1 budget still has room for (see
+the resolution note below).
 Every result — including denials — is appended to `run.tool_results` (the M1.4 field this was
 reserved for).
 
@@ -396,6 +398,12 @@ successes and denials land in `run.tool_results`.
 **[4B gap]** Result truncation is a context-budget concern, not a nicety: one untruncated tool
 result can consume the 4B's entire remaining window. The 2000-char default is a placeholder —
 M4.1's token budgeter is the real owner of this number once it exists.
+**✅ Resolved 2026-09-07 (M4.1 rework):** it took ownership. `max_result_chars` became
+`max_result_bytes` and now derives from the live budget's `available`; the constructor value
+survives only as a fallback for a run with no planned budget. The flat cap had become the
+clearest case of a 4B constant penalising the target model — on a 262k window it truncated a
+`read_file` of a 500-line source file to roughly 60 lines, which would have broken `site_gen`'s
+whole editing flow (M9.5) on exactly the model big enough to run it.
 
 ### [x] M2.4 — First real tool pack for `ui_ux` — DONE (2026-08-31)
 
@@ -526,78 +534,130 @@ profile's cap fails at startup, instead of silently degrading the 4B's tool sele
 
 ## Phase 4 — Context management
 
-### [x] M4.1 — Token budgeter — DONE (2026-09-04)
+### [x] M4.1 — Token budgeter — DONE (2026-09-04), REWORKED (2026-09-07)
 
-Shipped [app/core/token_budget.py](../app/core/token_budget.py): `count_tokens(text) -> int`
-and `allocate_budget(profile, configured_num_ctx) -> TokenBudget`, a frozen dataclass with
-`system` / `retrieved_context` / `history` / `tool_results` / `reserved_output` slots plus
-`.to_dict()`.
+Shipped [app/core/token_budget.py](../app/core/token_budget.py): `count_tokens(text)`,
+`max_text_bytes(tokens)` (its inverse), `effective_context_window(profile, num_ctx | None)`, and
+`plan_budget(...) -> TokenBudget`.
+
+**The first version used fixed fractions and was wrong. It has been replaced — do not restore
+it.** That version split the window into percentages (`reserved_output` 0.30, `history` 0.30,
+`retrieved_context` 0.15, `tool_results` 0.15, `system` 0.10). The flaw only becomes visible off
+the dev window: **`system` and `tool_schema` cost what they cost regardless of window size** —
+measured 53 and 420 tokens for `ui_ux`'s prompt and 4-tool schema — so a percentage of the window
+over-allocates them without bound as the window grows:
+
+| Window | Fraction model gave `system`+`tool_schema` | Real need | Wasted |
+|---|---|---|---|
+| 4,096 (old dev cap) | 818 | 473 | 345 |
+| 32,768 (`qwen3:4b` real) | 6,552 | 473 | 6,079 |
+| 262,144 (`qwen3.8-27b`) | 52,428 | 473 | **51,955** |
+| 1,048,576 (YaRN-extended) | 209,714 | 473 | **209,241** |
+
+The error **scales with the window**, which is exactly backwards for a project whose target is
+the 27B (see the 2026-09-07 decision in CLAUDE.md §3).
+
+**The replacement: measure what can be measured, reserve only what cannot.** The segments split
+by *when they can be known*, and get opposite treatment:
+
+- **Measurable before the call** — `system`, `tool_schema`, `current_input`: counted and
+  subtracted. Never allocated a share. You are holding the string; apportioning a percentage to
+  something you can simply count is the whole mistake.
+- **Does not exist yet** — `reserved_output`: genuinely reserved, as a **floor**. It is what stops
+  the window filling so full there is no room to answer. On a large window it never binds; on a
+  small one it is the only thing preventing an overflow.
+
+```
+available = window − reserved_output − count(system) − count(tool_schema) − count(current_input)
+```
+
+`available` is **one shared pool** for the elastic segments — history, tool results, and later
+M6.4's retrieved context and M3.2's skills. They need no pre-split: **M4.3 already defines the
+order they are sacrificed in** (drop oldest tool results → drop oldest turns → summarize → trim
+retrieved context). That order *is* the policy; a second, fraction-based one would only
+contradict it.
+
+`available < 0` is a real, logged state — "the fixed cost plus the reservation already exceed this
+window" — which the fraction model could not express at all, since it always returned a
+full-looking allocation. It is logged, not raised: trimming history can still rescue the call
+(M4.3), and raising would 500 a request that is merely tight.
+
+**`reserved_output` is per-domain, declared on the agent** as `Agent.reserved_output_tokens`
+(`ClassVar`, deliberately **no default** — same reasoning as `Tool.read_only`: forgetting it must
+be loud). What a response needs is a property of the *task*, not of the model: a `ui_ux` review is
+prose (**1500**, covering the several hundred tokens this model family burns reasoning inline per
+CLAUDE.md §3), while one `site_gen` file will be several thousand. Note for Phase 9: a `site_gen`
+run never emits a whole project in one response — files go out one per `write_file` call across
+loop iterations (M9.2), so this number sizes *one file*, not the project.
+
+**Budget is planned per CALL, not per run.** `Agent._plan_budget(run, system=…, tool_schema=…,
+current_input=…)` writes `run.token_budget` and logs the line. The first version planned once in
+`_new_run_context`, which was a latent bug: M5.2 states *"every iteration re-runs the budgeter"*
+because the tool-result tail grows each pass, so a run-start budget is stale by the second call.
+The new signature makes that structural — you cannot plan without the actual prompt and schema.
+
+**Two hardcoded 4B numbers were removed in the same change:**
+
+1. **`MODEL_NUM_CTX` is now optional** (`Settings.model_num_ctx: int | None = None`), with
+   `Settings.effective_num_ctx` resolving it. Unset means *use the whole window the profile
+   describes*. The old `4096` default capped **every** model behind it — including `qwen3:4b`
+   itself, held to 1/8 of its real 32,768 window, and it would have silently held the 27B to 4,096
+   too. Set it only to *constrain* a run below the model's real capability (a local CPU box short
+   on RAM); never to describe the model, which is `ModelProfile`'s job. `lifespan.py` now warns in
+   **both** directions — constraining below the profile is legitimate but worth saying out loud,
+   because the symptom of forgetting it (a 262k model behaving like a 4k one) is otherwise
+   invisible.
+2. **`ToolExecutor`'s flat 2000-char cap became `max_result_bytes`, derived from the live
+   budget.** M2.3 explicitly named M4.1 as this number's real owner once it existed. `available`
+   already has the fixed cost and the output reservation subtracted and shrinks each iteration as
+   results accumulate, so capping at it needs no fraction and no per-model tuning. The constructor
+   value survives only as a fallback for a run with no planned budget. Truncation is **byte-wise**
+   (`errors="ignore"` on the cut) to match how `count_tokens` measures — slicing a `str` by
+   characters could still overflow the byte budget on Vietnamese or CJK output, and a naive byte
+   slice could leave half a character behind.
+
+Measured effect of the two together, on `ui_ux` with all 4 tools registered:
+
+| | Old (`MODEL_NUM_CTX=4096`, fractions) | New (unset, measured) |
+|---|---|---|
+| `qwen3:4b` window | 4,096 | **32,768** |
+| `qwen3.8-27b` window | 4,096 | **262,144** |
+| fixed cost | not counted (`tool_schema` had no slot at all) | 497, identical on both |
+| `available` | — | 30,771 / **260,147** |
 
 **No tokenizer library is bundled** — Python 3.10, and Ollama exposes no tokenize-only endpoint
-(`extract_usage`'s `prompt_eval_count` only exists after a call completes, too late for a
-pre-send budget). A real Qwen tokenizer (HuggingFace `tokenizers`, no `transformers`/`torch`
-needed) was considered and rejected for now: `qwen3.8-27b` (the prod tag) 404s from the public
-Ollama library, so its exact vocab isn't confirmed available — bundling a tokenizer verified only
-against the dev tag would be a false precision. `count_tokens` counts **UTF-8 bytes, not
-`len(str)` codepoints**, then applies chars-per-token math with a 15% safety margin: BPE
-tokenizers (Qwen included) operate on UTF-8 bytes, so a Vietnamese or CJK character — 1
-codepoint but 2-4 bytes — costs more tokens than an ASCII character at the same codepoint count.
-A codepoint-based heuristic systematically undercounts non-ASCII text; counting bytes tracks the
-real cost much closer, with no new dependency. Revisit the real-tokenizer option once
-`qwen3.8-27b`'s vocab is confirmed (it likely shares Qwen3's family-wide tokenizer, but that is
-still an unverified assumption, not a fact to build on).
+(`extract_usage`'s `prompt_eval_count` only exists after a call completes, too late for a pre-send
+budget). A real Qwen tokenizer (HuggingFace `tokenizers`, no `transformers`/`torch` needed) was
+considered and rejected for now: `qwen3.8-27b` 404s from the public Ollama library, so its exact
+vocab is not confirmed available — one verified only against the dev tag would be false precision.
+Revisit once the prod vocab is real (it likely shares Qwen3's family-wide tokenizer, but that is
+an assumption, not a fact to build on). `count_tokens` counts **UTF-8 bytes, not `len(str)`
+codepoints**, with a 15% safety margin: BPE tokenizers operate on UTF-8 bytes, so a Vietnamese or
+CJK character — 1 codepoint but 2-4 bytes — costs more than an ASCII one at the same codepoint
+count, and a codepoint-based heuristic systematically undercounts non-ASCII text.
 
-**Budgets are keyed off the effective window, not just `ModelProfile.context_window`** — the
-original wording above. `effective_context_window()` takes `min(profile.context_window,
-configured_num_ctx)`: `Settings.model_num_ctx` (the value actually sent to Ollama as
-`options.num_ctx`, default 4096 in dev) is well under `qwen3:4b`'s 32768-token profile ceiling,
-and budgeting off the profile alone would allocate slots the model was never actually given.
-`lifespan.py` already warns the other direction (num_ctx exceeding the profile); this is the
-same mismatch guarded from the budgeter's side.
-
-Slot split (fractions of the effective window, tuned for the 4B per the `[4B gap]` note below):
-`reserved_output` 0.30, `history` 0.30, `retrieved_context` 0.15, `tool_results` 0.15, `system`
-0.10. Reserved output ties history for the largest share deliberately — CLAUDE.md §3's measured
-behaviour is that `qwen3:4b` always reasons regardless of `think`, and a tight reserved-output
-slot truncates mid-reasoning into an empty answer (observed), not a short one.
-
-**Wired into `RunContext` immediately**, not left for M4.2: `Agent._new_run_context`
-(`app/core/agent_base.py`) now calls `allocate_budget(profile, settings.model_num_ctx)` and sets
-`run.token_budget` on every request. Nothing reads the slots yet — M4.2's assembly pipeline and
-M4.3's truncation are the first real consumers — but the field is no longer always `None`.
-
-**Slot ownership clarified for the loop (asked and answered before M5.2 exists, so the
-milestone starts unambiguous):** `tool_results` is the CURRENT run's own ReAct scratchpad — the
-`assistant(tool_calls) + tool(result)` pairs a single run accumulates across M5.2's loop
-iterations — not `history`, and not `reserved_output` once a response has been received (that
-slot is re-guaranteed fresh every iteration per M5.2's "every iteration re-runs the budgeter",
-sized for the response about to be generated, not output already in hand). `history` is prior
-*requests'* turns, re-sent by the client (M4.4 stateless). M4.2's message order names two
-sub-segments — `(summarized history)` then `recent turns` — but they are one budget pool over
-the compaction lifecycle (M4.3 folds dropped `recent_turns` into the `summarized_history`
-message), not two independently-sized slots — **there is deliberately no separate
-`recent_turns` slot.** Documented in `token_budget.py`'s module docstring and `TokenBudget`'s
-field comments, not just here.
-
-**Flagged, not fixed: `tool_results` at 0.15 is unverified against real loop numbers.** At the
-dev-default 4096-token window that's ~614 tokens, and M2.3's 2000-char per-result truncation cap
-(already a placeholder) eats ~575 of those in ONE result — with M5.2's planned 2-3 max
-iterations on the 4B, this slot will likely trigger M4.3 truncation almost every loop. Re-tune
-this fraction together with M4.3/M5.2 once a real loop exists to measure against; do not
-hand-tune it blind now.
-
-8 new tests in [tests/test_token_budget.py](../tests/test_token_budget.py) (86 total): empty-text
-count, the overestimate math, a Vietnamese-text regression proving the byte-based count exceeds
-what a codepoint-based one would give, the effective-window clamp in both directions, slot sum ≤
-total, reserved-output as the largest slot, scaling between a small and large profile, and
-`.to_dict()` shape. Full suite re-run green.
+11 tests in [tests/test_token_budget.py](../tests/test_token_budget.py) and 11 in
+[tests/test_tool_execution.py](../tests/test_tool_execution.py) (92 total), including: the
+`max_text_bytes` round-trip (text trimmed to it counts back at or under the allowance), that
+`effective_context_window(profile, None)` yields the full profile window, that **fixed cost is
+identical across a 32k and a 262k profile while all the extra window flows into `available`** (the
+regression test for the fraction bug), that `available < 0` is reported rather than hidden, that
+truncation follows a planned budget instead of the fallback constant, and that byte-wise
+truncation never splits a Vietnamese character.
 
 **Depends on:** M1.1. ✅ **Blocks M6.4** — now unblocked.
-**[4B gap]** Confirmed the concern the milestone flagged: on `qwen3:4b`'s dev-default 4096-token
-effective window, `reserved_output` comes out to ~1228 tokens — generous enough for the several
-hundred tokens of reasoning CLAUDE.md §3 measured, but real fractions had to be tuned against
-that number, not the profile's 32768 ceiling, or the budget would have described a window three
-times bigger than what Ollama is actually given.
+**Slot ownership, for M5.2:** `tool_results` (drawn from `available`) is the CURRENT run's own
+ReAct scratchpad — the `assistant(tool_calls) + tool(result)` pairs one run accumulates across
+loop iterations — not `history`, and not `reserved_output` once a response is in hand (that is
+re-guaranteed fresh every iteration, sized for the response about to be generated). `history` is
+prior *requests'* turns, re-sent by the client (M4.4 stateless). M4.2's message order names
+`(summarized history)` and `recent turns` separately, but they are one pool over the compaction
+lifecycle (M4.3 folds one into the other) — **there is deliberately no separate `recent_turns`
+budget.**
+**[4B gap]** Inverted by the 2026-09-07 decision: this milestone is no longer tuned to the 4B at
+all. There is no per-model constant left in it — the 4B and the 27B run identical arithmetic over
+different `ModelProfile.context_window` values, which is what makes the 4B usable as a smoke test
+without capping the 27B.
 
 ### M4.2 — Message assembly pipeline
 A deterministic builder producing the final message list in a fixed order:
@@ -1140,6 +1200,22 @@ build those.
   `.env.example` until M4.4 needs it.
 - **Vision: stays optional and non-blocking.** Revisit only once the real 27B runs on prod — do not
   spend dev time on a local VL model before then.
+
+**Decisions settled (2026-09-07) — do not re-ask:**
+- **`qwen3.8-27b` is the target; `qwen3:4b` is a local smoke test, not a gate.** This *replaces*
+  CLAUDE.md §3's former rule ("if it only works on 27B, it is not done"). The 4B still earns its
+  place — it catches gross breakage locally, cheaply, before anything touches a GPU box — but a 4B
+  failure is now a **measured result to record, not a blocker**. Consequence for M9.4, whose
+  framing assumed the opposite: "the 4B loses coherence past 2 calls" remains a perfectly good
+  outcome to write down, and no longer scales the milestone's ambition down with it.
+- **No model's numbers are hardcoded; all of them come from `ModelProfile` or a measurement.**
+  The numeric extension of the existing "never branch on `model_name`" rule. Two constants were
+  removed under it (M4.1 rework): the `MODEL_NUM_CTX=4096` default and M2.3's flat 2000-char
+  tool-result cap. Before adding any new constant tuned against whichever model happens to be
+  installed, check whether it can be derived from the profile or simply measured instead.
+- **The token budget is measured, not apportioned.** No fractions — see M4.1's rework writeup for
+  the numbers (the fraction model wasted ~52k tokens on a 262k window for a 473-token real need,
+  and its error grows with the window). Do not reintroduce percentage-based slots.
 
 **Decisions settled (2026-08-31) — do not re-ask:**
 - **Phase structure was audited against a 9-component agent-harness taxonomy** (loop, context,

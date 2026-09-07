@@ -1,89 +1,89 @@
-"""Owns the model's context window: counts tokens and splits the effective window into
-fixed slots (system, retrieved context, history, tool results, reserved output).
+"""Owns the model's context window: counts tokens, and plans per call how much of the
+window is already spoken for and how much is left.
 
-Nothing consumes the slot values yet — M4.2's assembly pipeline and M4.3's truncation
-strategy are the first callers, and M6.4 (RAG injection) blocks on this existing. See
-ROADMAP M4.1. `RunContext.token_budget` is populated eagerly by `Agent._new_run_context`
-so those milestones have something to read from day one.
+**Measured, not apportioned.** An earlier version of this module split the window into
+fixed fractions (system 10%, history 30%, ...). That was wrong in a way that got *worse*
+as the window grew: `system` and `tool_schema` cost what they cost — measured at 53 and
+420 tokens for `ui_ux` — whether the window is 4k or 1M. A percentage handed those two
+52,428 tokens on a 262k window, and ~209k on a YaRN-extended 1M one, for a real need of
+473. Fractions are only defensible for things that do not exist yet and therefore cannot
+be measured.
 
-Two axes that are easy to conflate — see `TokenBudget`'s field docs for which slot owns
-which:
-- **`tool_results`** is the CURRENT run's own ReAct scratchpad (M5.2): the
-  `assistant(tool_calls) + tool(result)` pairs that accumulate as one run's loop iterates.
-  `reserved_output` is deliberately NOT a place to keep this — it is re-guaranteed fresh
-  before every iteration (M5.2: "every iteration re-runs the budgeter"), sized for the
-  response about to be generated, not for output already received. Once a response is in
-  hand it stops being "reserved" and becomes consumed context for the next call, so it
-  moves into `tool_results`.
-- **`history`** is PRIOR requests' conversation turns, re-sent by the client each call
-  (M4.4: this service is stateless). M4.2's message order names two sub-segments within
-  this one pool — `(summarized history)` then `recent turns` — but they are two
-  representations of the same budget over the compaction lifecycle (M4.3: oldest
-  `recent_turns` get folded into the `summarized_history` message once over budget), not
-  two independently-sized slots. There is deliberately no separate `recent_turns` slot.
+So the segments split by **when they can be known**, and get opposite treatment:
+
+- **Measurable before the call** — `system`, `tool_schema`, `current_input`: counted and
+  subtracted. Never allocated a share.
+- **Does not exist yet** — `reserved_output`: genuinely reserved, as a *floor*. It is what
+  stops the window being filled so full there is no room left to answer. On a large window
+  it never binds; on a small one it is the only thing preventing an overflow.
+
+What remains is `available`: one shared pool the elastic segments draw from — history, tool
+results, and later M6.4's retrieved context and M3.2's skills. They need no pre-split,
+because M4.3 already defines the order they are sacrificed in (drop oldest tool results →
+drop oldest turns → summarize → trim retrieved context). That order *is* the policy; a
+second, fraction-based one would only contradict it.
+
+`available < 0` is a real and reportable state, not an impossible one: it says the fixed
+cost plus the output reservation already exceed the window. The fraction model could not
+express that at all — it always returned a full-looking allocation.
+
+**No number here is tied to a model.** The dev/prod difference is entirely
+`ModelProfile.context_window` plus the per-domain `reserved_output`; see ROADMAP M4.1.
 """
 
+import logging
 import math
 from dataclasses import dataclass
 
 from app.core.model_profile import ModelProfile
 
+logger = logging.getLogger(__name__)
+
 # No tokenizer is bundled (Python 3.10, no new dependency — same call made for fetch_docs's
 # stdlib HTML parsing) and Ollama exposes no tokenize-only endpoint: extract_usage's
 # prompt_eval_count only exists after a call completes, too late for a pre-send budget.
 #
-# Counted in UTF-8 BYTES, not `len(str)` codepoints: BPE tokenizers (Qwen included) operate on
-# UTF-8 bytes, so a Vietnamese or CJK character — 1 codepoint but 2-4 bytes — costs more tokens
-# than an ASCII character of the same codepoint count. A codepoint-based chars/4 heuristic
-# systematically undercounts non-ASCII text; counting bytes tracks the real cost much closer,
-# with no new dependency. 4 bytes/token is the standard rough estimate; the 15% margin biases
-# toward overestimating on top of that, since a count that's too low is the one that actually
-# overflows the window.
+# Counted in UTF-8 BYTES, not `len(str)` codepoints: BPE tokenizers (Qwen included) operate
+# on UTF-8 bytes, so a Vietnamese or CJK character — 1 codepoint but 2-4 bytes — costs more
+# tokens than an ASCII character at the same codepoint count. A codepoint-based chars/4
+# heuristic systematically undercounts non-ASCII text; counting bytes tracks the real cost
+# much closer, with no new dependency. 4 bytes/token is the standard rough estimate; the 15%
+# margin biases toward overestimating on top of that, since a count that is too low is the
+# one that actually overflows the window.
 _BYTES_PER_TOKEN = 4
 _SAFETY_MARGIN = 1.15
-
-# Fractions of the effective window (see effective_context_window) — must sum to 1.0.
-# Reserved output gets the largest single share on purpose: CLAUDE.md's measured behaviour
-# on qwen3:4b is that it always reasons regardless of `think`, and a tight num_predict
-# truncates mid-reasoning into an empty answer (observed) rather than a short one.
-#
-# tool_results at 0.15 is UNVERIFIED against real multi-iteration loop numbers: at the dev
-# default (4096-token effective window) that's ~614 tokens, and M2.3's per-tool-result
-# truncation cap (2000 chars, itself a placeholder pending this milestone) already eats
-# ~575 of those in ONE result. With M5.2's planned max_iterations of 2-3 on the 4B, this
-# slot is likely to trigger M4.3 truncation almost every loop. Re-tune this fraction
-# together with M4.3/M5.2 once a real loop exists to measure against — don't hand-tune it
-# blind now.
-_RESERVED_OUTPUT_FRACTION = 0.30
-_HISTORY_FRACTION = 0.30
-_SYSTEM_FRACTION = 0.10
-_RETRIEVED_CONTEXT_FRACTION = 0.15
-_TOOL_RESULTS_FRACTION = 0.15
 
 
 @dataclass(frozen=True)
 class TokenBudget:
-    total: int
+    """One call's plan. Every field is a token count."""
+
+    total: int  # the effective window this call may use
+    reserved_output: int  # floor kept free for the response (see module docstring)
+
+    # Measured, incompressible. Their sum is `fixed`.
     system: int
-    retrieved_context: int
-    # Prior requests' conversation turns (client re-sent, M4.4 stateless). Covers both
-    # not-yet-compacted recent turns and the rolling summary M4.3 folds them into — one
-    # pool, not two slots. See the module docstring.
-    history: int
-    # The CURRENT run's own ReAct scratchpad (M5.2): assistant(tool_calls) + tool(result)
-    # pairs accumulated across this run's loop iterations. NOT prior-request history, and
-    # NOT reserved_output once a response has been received. See the module docstring.
-    tool_results: int
-    reserved_output: int
+    tool_schema: int
+    current_input: int
+    fixed: int
+
+    # window - reserved_output - fixed. Shared by history, tool results, and later
+    # retrieved context and skills. Negative means the call does not fit as composed.
+    available: int
+
+    @property
+    def is_over_budget(self) -> bool:
+        return self.available < 0
 
     def to_dict(self) -> dict[str, int]:
         return {
             "total": self.total,
-            "system": self.system,
-            "retrieved_context": self.retrieved_context,
-            "history": self.history,
-            "tool_results": self.tool_results,
             "reserved_output": self.reserved_output,
+            "system": self.system,
+            "tool_schema": self.tool_schema,
+            "current_input": self.current_input,
+            "fixed": self.fixed,
+            "available": self.available,
         }
 
 
@@ -96,28 +96,86 @@ def count_tokens(text: str) -> int:
     return math.ceil(len(text.encode("utf-8")) / _BYTES_PER_TOKEN * _SAFETY_MARGIN)
 
 
-def effective_context_window(profile: ModelProfile, configured_num_ctx: int) -> int:
-    """The window actually in effect, not just the profile's ceiling.
+def max_text_bytes(tokens: int) -> int:
+    """Inverse of `count_tokens`: the largest UTF-8 byte length that still fits `tokens`.
 
-    `configured_num_ctx` (Settings.model_num_ctx) is what OllamaProvider actually sends as
-    `options.num_ctx` — it defaults to 4096 in dev, well under qwen3:4b's 32768-token profile
-    ceiling. Budgeting off the profile alone would allocate slots the model was never actually
-    given. lifespan.py already warns the other direction (num_ctx exceeding the profile); this
-    is the same guard applied to the budgeter.
+    Used to turn a token allowance back into a truncation limit for a string (M2.3's tool
+    result cap). Deliberately the exact inverse, margin included, so a string trimmed to
+    this length counts back at or under `tokens`.
     """
+    if tokens <= 0:
+        return 0
+    return int(tokens * _BYTES_PER_TOKEN / _SAFETY_MARGIN)
+
+
+def effective_context_window(profile: ModelProfile, configured_num_ctx: int | None) -> int:
+    """The window actually in effect.
+
+    `configured_num_ctx` (`Settings.model_num_ctx`) is what `OllamaProvider` sends as
+    `options.num_ctx`. It is **optional on purpose**: unset means "use the whole window the
+    profile describes", so pointing `MODEL_NAME` at a bigger model widens the budget with no
+    second setting to remember. Set it only to *constrain* a run below the model's real
+    capability — a local CPU box short on RAM — never to describe the model, which is
+    `ModelProfile`'s job.
+    """
+    if configured_num_ctx is None:
+        return profile.context_window
     return min(profile.context_window, configured_num_ctx)
 
 
-def allocate_budget(profile: ModelProfile, configured_num_ctx: int) -> TokenBudget:
-    """Split the effective window into fixed slots. Deterministic and profile-driven — the
-    dev/prod difference is `configured_num_ctx` and `profile.context_window`, not a branch on
-    model name (see app/core/model_profile.py)."""
+def plan_budget(
+    *,
+    profile: ModelProfile,
+    configured_num_ctx: int | None,
+    reserved_output: int,
+    system: str = "",
+    tool_schema: str = "",
+    current_input: str = "",
+) -> TokenBudget:
+    """Plan one call: measure what is already spoken for, reserve room to answer, report
+    what is left.
+
+    Must be re-run before **every** model call, not once per run — M5.2's loop grows the
+    tool-result tail on each iteration, so a budget planned at run start is stale by the
+    second call.
+
+    `tool_schema` is the serialized schema handed to the backend (`json.dumps` of
+    `ToolRegistry.schema()`). Its token cost is an estimate of an estimate — Ollama renders
+    the schema into the model's chat template, so the exact on-wire cost differs — but it is
+    real context, and counting it approximately beats the previous behaviour of counting it
+    not at all.
+    """
     total = effective_context_window(profile, configured_num_ctx)
-    return TokenBudget(
+
+    system_tokens = count_tokens(system)
+    tool_schema_tokens = count_tokens(tool_schema)
+    current_input_tokens = count_tokens(current_input)
+    fixed = system_tokens + tool_schema_tokens + current_input_tokens
+    available = total - reserved_output - fixed
+
+    budget = TokenBudget(
         total=total,
-        system=math.floor(total * _SYSTEM_FRACTION),
-        retrieved_context=math.floor(total * _RETRIEVED_CONTEXT_FRACTION),
-        history=math.floor(total * _HISTORY_FRACTION),
-        tool_results=math.floor(total * _TOOL_RESULTS_FRACTION),
-        reserved_output=math.floor(total * _RESERVED_OUTPUT_FRACTION),
+        reserved_output=reserved_output,
+        system=system_tokens,
+        tool_schema=tool_schema_tokens,
+        current_input=current_input_tokens,
+        fixed=fixed,
+        available=available,
     )
+
+    if budget.is_over_budget:
+        # Not an exception: trimming history or tool results (M4.3) can still rescue this
+        # call, and raising here would 500 a request that is merely tight. But it must be
+        # loud — it means the fixed cost alone cannot be served by this window.
+        logger.warning(
+            "token budget exceeded before any history: window=%d reserved_output=%d "
+            "fixed=%d (system=%d tool_schema=%d current_input=%d) available=%d",
+            total,
+            reserved_output,
+            fixed,
+            system_tokens,
+            tool_schema_tokens,
+            current_input_tokens,
+            available,
+        )
+    return budget
