@@ -126,6 +126,24 @@ class OllamaProvider(ModelProvider):
             raise ProviderError("Model returned reasoning only, with no answer")
         return cleaned
 
+    def extract_assistant_message(self, raw: dict[str, Any]) -> dict[str, Any]:
+        message = raw.get("message")
+        if not isinstance(message, dict):
+            raise ProviderError(f"Unexpected response shape from Ollama: {raw!r:.300}")
+
+        # Content is passed through UNSTRIPPED — see the base-class docstring. Ollama also
+        # splits reasoning into `message.thinking` when the model honours `think: true`, so
+        # carry that too when present rather than losing it on the way back into history.
+        assistant: dict[str, Any] = {
+            "role": message.get("role", "assistant"),
+            "content": message.get("content", ""),
+        }
+        if message.get("thinking"):
+            assistant["thinking"] = message["thinking"]
+        if message.get("tool_calls"):
+            assistant["tool_calls"] = message["tool_calls"]
+        return assistant
+
     def extract_usage(self, raw: dict[str, Any]) -> RunUsage:
         # total_duration is nanoseconds covering the whole request (load + prompt eval + eval) —
         # matches wall-clock latency observed in practice (see CLAUDE.md §3 measurements).

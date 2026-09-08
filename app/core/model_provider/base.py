@@ -54,6 +54,24 @@ class ModelProvider(ABC):
         """
         raise NotImplementedError
 
+    def extract_assistant_message(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """The assistant's turn **as it should be re-sent in history**, not as shown to a user.
+
+        Distinct from `extract_content` on purpose, and the distinction is load-bearing:
+        `extract_content` strips the model's `<think>` block, which is right for a response
+        body and wrong for a conversation turn. `qwen3.8-27b` enables `preserve_thinking` by
+        default and expects the thinking from *all* prior messages back
+        (docs/qwen3.8-27b-reference.md), so building history out of `extract_content` would
+        silently discard exactly what that model wants retained — and would also undercount
+        the turn against M4.1's budget, since the hidden part still occupies context.
+
+        Returns the message with reasoning INTACT and any `tool_calls` preserved. Whether to
+        keep or drop the thinking is policy, decided by the caller from
+        `ModelProfile.retains_thinking_in_history` — this method only reports the shape,
+        which is backend-specific, exactly like the other `extract_*` methods.
+        """
+        raise NotImplementedError
+
     def extract_usage(self, raw: dict[str, Any]) -> RunUsage:
         """Pull token/latency metrics out of a raw response. See extract_content — same reason:
         metric field names (e.g. Ollama's `prompt_eval_count` vs. an OpenAI-style `usage.

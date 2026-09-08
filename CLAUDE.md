@@ -222,7 +222,12 @@ that matter here and that family-resemblance guesses got wrong:
 - **Thinking is ON by default**, emitted as *properly delimited* `<think>…</think>` — documented
   behaviour, not the 4B's bare-closing-tag defect. Depth is tunable via **`reasoning_effort`**
   (`xhigh` default / `medium` / `low`), and **`preserve_thinking` is on by default**, retaining
-  thinking blocks from *all* prior messages.
+  thinking blocks from *all* prior messages. Recorded as
+  `ModelProfile.retains_thinking_in_history`. **Consequence: build conversation history from
+  `ModelProvider.extract_assistant_message()`, never from `extract_content()`** — the latter
+  strips `<think>`, which is right for a response body and silently destructive for a history
+  turn (it also undercounts that turn against the budget, since the hidden part still occupies
+  context).
 - **Output guidance for agentic tasks: reasoning up to 262,144 tokens, final response up to
   131,072.** Handled: `ModelProfile.reasoning_reserve_tokens` carries the model's reasoning cost
   (1,024 on the 4B, **32,768** on this one) and `Agent.reserved_output_tokens` carries only the
@@ -318,6 +323,8 @@ app/
 │   ├── model_provider/
 │   │   ├── base.py             ModelProvider ABC: chat(), aclose(), extract_content(),
 │   │   │                       extract_tool_calls() -> [{name,arguments}],
+│   │   │                       extract_assistant_message() -> the turn AS RE-SENT (reasoning
+│   │   │                       intact — history must use this, not extract_content),
 │   │   │                       extract_usage() -> RunUsage, embed()
 │   │   └── ollama_provider.py  httpx.AsyncClient; error mapping; </think> stripping;
 │   │                           extract_usage() from prompt_eval_count/eval_count/total_duration;

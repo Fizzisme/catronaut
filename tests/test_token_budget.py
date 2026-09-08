@@ -17,6 +17,7 @@ _SMALL_PROFILE = ModelProfile(
     supports_native_tools=True,
     tool_call_style="native",
     reasoning_reserve_tokens=1_024,
+    retains_thinking_in_history=False,
     reliability_tier="small",
 )
 
@@ -27,6 +28,7 @@ _LARGE_PROFILE = ModelProfile(
     supports_native_tools=True,
     tool_call_style="native",
     reasoning_reserve_tokens=32_768,
+    retains_thinking_in_history=True,
     reliability_tier="large",
 )
 
@@ -121,6 +123,7 @@ def test_plan_budget_reports_over_budget_instead_of_hiding_it():
         supports_native_tools=False,
         tool_call_style="prompt",
         reasoning_reserve_tokens=128,
+        retains_thinking_in_history=False,
         reliability_tier="small",
     )
     budget = plan_budget(

@@ -96,6 +96,45 @@ def test_unknown_domain_is_404(client):
         client.app.state.orchestrator.get_agent("nope")
 
 
+def test_assistant_message_for_history_keeps_reasoning_that_extract_content_strips():
+    """The trap this method exists to close (ROADMAP M4.2).
+
+    `extract_content` strips `<think>` — right for a response body, wrong for a history turn.
+    `qwen3.8-27b` enables `preserve_thinking` by default and expects prior thinking back, so
+    building history from `extract_content` would discard exactly that, and would also
+    undercount the turn against M4.1's budget since the hidden part still occupies context.
+    """
+    provider = OllamaProvider("http://localhost:11434", "qwen3:4b", num_ctx=4096, timeout_s=5)
+    raw = {"message": {"role": "assistant", "content": "Weighing options.</think>\n\nUse 16px."}}
+
+    assert provider.extract_content(raw) == "Use 16px."  # user-facing: stripped
+    history = provider.extract_assistant_message(raw)  # wire-facing: intact
+    assert history["role"] == "assistant"
+    assert "Weighing options." in history["content"]
+    assert len(history["content"]) > len(provider.extract_content(raw))
+
+
+def test_assistant_message_for_history_carries_tool_calls():
+    provider = OllamaProvider("http://localhost:11434", "qwen3:4b", num_ctx=4096, timeout_s=5)
+    calls = [{"function": {"name": "check_contrast", "arguments": {"foreground": "#000"}}}]
+    raw = {"message": {"role": "assistant", "content": "", "tool_calls": calls}}
+
+    history = provider.extract_assistant_message(raw)
+
+    # A tool-calling turn must round-trip, or the loop (M5.2) cannot show the model what it
+    # already asked for — and on the native path `content` is empty, so it is all there is.
+    assert history["tool_calls"] == calls
+
+
+def test_profiles_state_whether_history_carries_thinking():
+    from app.core.model_profile import get_model_profile
+
+    # Not a family trait: qwen3.8-27b is a different generation with `preserve_thinking` on
+    # by default; qwen3:4b has no such feature. See docs/qwen3.8-27b-reference.md.
+    assert get_model_profile("qwen3.8-27b").retains_thinking_in_history is True
+    assert get_model_profile("qwen3:4b").retains_thinking_in_history is False
+
+
 def test_reserved_output_combines_task_length_and_model_reasoning():
     """The domain owns how long the ANSWER is; the profile owns how much the model spends
     reasoning to get there (ROADMAP M5.3). One combined constant could not be right for both

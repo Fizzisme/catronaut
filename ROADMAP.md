@@ -761,6 +761,19 @@ rather than discover:
   it (typed `ChatTurn`, pulled forward from M9.3) — a `{role, content}` pair alone cannot round-trip
   them.
 
+**✅ The mechanism for the above shipped 2026-09-08, so M4.2 starts with it rather than
+rediscovering it mid-build:**
+- **`ModelProfile.retains_thinking_in_history`** (no default) states what each model expects —
+  `True` for `qwen3.8-27b`, `False` for the Qwen3 tags. M4.2 reads it; it does not re-derive it
+  from the model name.
+- **`ModelProvider.extract_assistant_message(raw)`** returns the assistant turn **as it should be
+  re-sent**: reasoning intact, `tool_calls` preserved. It exists precisely because
+  `extract_content` strips `<think>` — correct for a response body, silently destructive for a
+  history turn. **Build history from this, never from `extract_content`.** Where reasoning lives
+  in the payload is backend-specific (Ollama also splits it into `message.thinking` when `think`
+  is honoured), so it sits behind the ABC like the other `extract_*` methods, and M1.6's provider
+  must implement it too.
+
 **Depends on:** M4.1. Soft dependency on **M1.6** to verify any of the above against the real model.
 
 ### M4.3 — Truncation and compaction strategy
