@@ -93,6 +93,24 @@ def test_extract_usage_reads_openai_field_names(provider):
 
 # --- history: reasoning must survive the round trip (M4.2) ------------------
 
+@pytest.mark.parametrize("field", ["reasoning_content", "reasoning"])
+def test_assistant_message_keeps_reasoning_under_either_field_name(provider, field):
+    """Regression: this provider first checked only `reasoning_content`, the vLLM/SGLang
+    convention, and silently dropped every reasoning block from a server that names the field
+    differently — which `scripts/openai_compat_check.py` caught on its first live run against
+    Ollama 0.33.3, where it is `reasoning`.
+
+    Neither name is in the OpenAI schema, so both are compatibility guesses; the key must also
+    round-trip under the name it arrived with, so the turn is valid for the server that
+    produced it.
+    """
+    raw = _reply({"role": "assistant", "content": "Done.", field: "weighing options"})
+
+    history = provider.extract_assistant_message(raw)
+
+    assert history[field] == "weighing options"
+
+
 def test_assistant_message_keeps_reasoning_and_tool_calls(provider):
     calls = [{"function": {"name": "read_file", "arguments": "{}"}}]
     raw = _reply({

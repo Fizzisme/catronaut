@@ -312,10 +312,35 @@ behaviour would only pretend to add confidence. Notably the request payload is a
 an `httpx.MockTransport`: correct endpoint, `chat_template_kwargs` rather than `think`, no
 `num_ctx`/`options`, and client-measured elapsed time.
 
-**⚠ Never verified against a live server** — `qwen3.8-27b` runs nowhere yet. The wire shapes come
-from the model card plus the OpenAI schema vLLM and SGLang implement. **Treat first deployment as
-the verification step**, and re-check `reasoning_content` specifically: exposing it as a separate
-field is a server-level choice, not part of the OpenAI schema.
+**✅ Verified live 2026-09-08 — 9/9, and it found a real bug.**
+[scripts/openai_compat_check.py](../scripts/openai_compat_check.py) runs the provider against a
+real OpenAI-compatible server. It can run *today* because **Ollama exposes
+`/v1/chat/completions` alongside its native API**, so the protocol is testable with no new
+infrastructure even though `qwen3.8-27b` itself needs far more VRAM than a laptop has. Against
+Ollama 0.33.3 / `qwen3:4b`:
+
+| Assumption | Result |
+|---|---|
+| `choices[0].message` | ✅ confirmed |
+| `usage.prompt_tokens` / `completion_tokens` | ✅ confirmed (15 / 110 tokens) |
+| duration absent, measured client-side | ✅ confirmed (4.2s) |
+| **tool arguments arrive as a JSON string** | ✅ confirmed — `type=str`, parsed correctly |
+| tool calls round-trip into a history turn | ✅ confirmed |
+| reasoning is exposed as `reasoning_content` | 🔴 **WRONG — bug found and fixed** |
+
+**The bug:** servers that split reasoning out of `content` do not agree on the field name.
+`reasoning_content` is the vLLM/SGLang convention; **Ollama calls it `reasoning`**. Neither is in
+the OpenAI schema. `extract_assistant_message` checked only the former, so on that server every
+history turn silently lost its reasoning — precisely the failure M4.2's `preserve_thinking` work
+exists to prevent, reintroduced one layer down. It now carries whichever keys are present, under
+the name they arrived with, so the turn round-trips to the server that produced it. Regression
+test parametrised over both names.
+
+**Still outstanding, and the script says so:** Ollama ignores unknown request fields rather than
+rejecting them, so this run does *not* prove `chat_template_kwargs.enable_thinking` or
+`reasoning_effort` are honoured, nor which name the prod engine uses for reasoning. Re-run the
+same script against vLLM/SGLang (`python scripts/openai_compat_check.py http://gpu-box:8000
+qwen3.8-27b`) to close those — it is written to be pointed anywhere.
 
 **Depends on:** M0.2 (the ABC). ✅ **Unblocks:** every milestone marked "BLOCKED ON
 INFRASTRUCTURE" (M9.7, M5.4, M8.4) from the *engineering* side — they remain blocked on the GPU

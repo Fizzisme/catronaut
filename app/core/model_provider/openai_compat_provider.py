@@ -44,6 +44,13 @@ from app.core.model_provider.base import ModelProvider, RunUsage, strip_thinking
 
 logger = logging.getLogger(__name__)
 
+# Field names a server may use when it splits reasoning out of `content`. Not part of the
+# OpenAI schema, so this is a compatibility list, not a spec: `reasoning_content` is the
+# vLLM / SGLang convention, `reasoning` is what Ollama's OpenAI-compatible layer emits
+# (verified live 2026-09-08). Add to this rather than renaming — see
+# `extract_assistant_message`.
+_REASONING_KEYS = ("reasoning_content", "reasoning")
+
 
 class OpenAICompatProvider(ModelProvider):
     def __init__(
@@ -216,10 +223,17 @@ class OpenAICompatProvider(ModelProvider):
             "role": message.get("role", "assistant"),
             "content": message.get("content", ""),  # UNSTRIPPED — see the base-class docstring
         }
-        # Servers with a reasoning parser (vLLM, SGLang) split thinking out here instead of
-        # leaving it inline. Carry it, or `preserve_thinking` has nothing to preserve.
-        if message.get("reasoning_content"):
-            assistant["reasoning_content"] = message["reasoning_content"]
+        # Servers with a reasoning parser split thinking into its own field instead of leaving
+        # it inline — and they do NOT agree on the name. `reasoning_content` is the
+        # vLLM/SGLang convention; Ollama's OpenAI-compatible layer calls it `reasoning`
+        # (verified live 2026-09-08 against Ollama 0.33.3 — this provider originally checked
+        # only the former and silently dropped every reasoning block that server produced).
+        # Neither name is in the OpenAI schema, so expect more of them: carry whichever keys
+        # are present, under the SAME name they arrived with, so the turn round-trips to the
+        # server that produced it.
+        for key in _REASONING_KEYS:
+            if message.get(key):
+                assistant[key] = message[key]
         if message.get("tool_calls"):
             assistant["tool_calls"] = message["tool_calls"]
         return assistant

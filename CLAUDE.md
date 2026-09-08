@@ -123,8 +123,15 @@
   `image_url` content blocks, and `chat_template_kwargs.enable_thinking` instead of Ollama's
   `think`. `strip_thinking()` moved to `base.py` (a Qwen-family property, not a server one) and
   `health()` joined the ABC (`/health` calls it on whichever provider is live).
-  **⚠ Never run against a live server** — shapes come from the card + the OpenAI schema; treat
-  first deployment as verification, especially `reasoning_content` (a server-level choice).
+  **✅ Verified live 2026-09-08, 9/9** via `scripts/openai_compat_check.py` — pointed at
+  **Ollama's own `/v1/chat/completions`**, which exists alongside its native API and makes the
+  protocol testable with no GPU. It **found a real bug**: servers disagree on the reasoning
+  field name (`reasoning_content` on vLLM/SGLang, **`reasoning` on Ollama**, neither in the
+  OpenAI schema), so history turns silently lost reasoning. Fixed to carry whichever key
+  arrives, under its own name. Confirmed live: JSON-string tool arguments, `choices[0].message`,
+  OpenAI usage fields, client-measured duration. **Still unproven** (Ollama ignores unknown
+  request fields): `chat_template_kwargs.enable_thinking`, `reasoning_effort`, and which
+  reasoning name the prod engine uses — re-run the same script against vLLM to close those.
   **⚠ `num_ctx` cannot be sent** on this path — the window is a server launch flag, so M4.1's
   budget becomes a *prediction*. Keep `ModelProfile.context_window` in step with how the engine
   was launched; `lifespan` logs the required minimum at startup.
@@ -378,7 +385,9 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `models/base`, `models/adapters/{ui_ux,code_review}`, `data/{raw,processed,vectorstore}`,
 `evaluation/{datasets/{ui_ux,code_review},results,scripts}`, `configs/`,
 `scripts/smoke_test.py` + `scripts/tool_call_check.py` (live M2.2 check) +
-`scripts/ui_ux_tool_pack_check.py` (live M2.4 check, all 4 tools + 1 real fetch; none in pytest),
+`scripts/ui_ux_tool_pack_check.py` (live M2.4 check, all 4 tools + 1 real fetch) +
+`scripts/openai_compat_check.py` (live M1.6 check, point it at any OpenAI-compatible server;
+none of the `*_check.py` scripts are in pytest),
 `tests/test_api.py` (17) + `tests/test_tools.py` (5) + `tests/test_tool_parsing.py` (22) +
 `tests/test_tool_execution.py` (11) + `tests/test_ui_ux_tools.py` (26) +
 `tests/test_token_budget.py` (11, M4.1) + `tests/test_openai_compat_provider.py` (15, M1.6),
