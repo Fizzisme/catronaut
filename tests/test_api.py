@@ -96,6 +96,39 @@ def test_unknown_domain_is_404(client):
         client.app.state.orchestrator.get_agent("nope")
 
 
+def test_reserved_output_combines_task_length_and_model_reasoning():
+    """The domain owns how long the ANSWER is; the profile owns how much the model spends
+    reasoning to get there (ROADMAP M5.3). One combined constant could not be right for both
+    tiers: `qwen3.8-27b` reasons at `xhigh` by default and spends far more than the 4B, while
+    a UI review is the same length either way."""
+    from app.core.model_profile import get_model_profile
+    from app.domains.ui_ux.agent import UIUXAgent
+
+    task = UIUXAgent.reserved_output_tokens
+    small = get_model_profile("qwen3:4b")
+    large = get_model_profile("qwen3.8-27b")
+
+    # Same task, different reservation — and the difference is exactly the model's own cost.
+    small_total = task + small.reasoning_reserve_tokens
+    large_total = task + large.reasoning_reserve_tokens
+    assert large_total > small_total
+    assert large_total - small_total == (
+        large.reasoning_reserve_tokens - small.reasoning_reserve_tokens
+    )
+    # Reserving must stay a small slice of the window, not eat it.
+    assert large_total < large.context_window // 4
+
+
+def test_every_profile_declares_a_reasoning_reserve():
+    """No default on purpose: a profile silently inheriting 0 would under-reserve on a
+    thinking model, and the answer just comes back truncated."""
+    from app.core.model_profile import _PROFILES
+
+    for tag, profile in _PROFILES.items():
+        assert profile.reasoning_reserve_tokens > 0, tag
+        assert profile.reasoning_reserve_tokens < profile.context_window, tag
+
+
 def test_every_registered_agent_declares_reserved_output_tokens():
     """`Agent.reserved_output_tokens` has no default, on purpose (ROADMAP M4.1) — what a
     response needs is a property of the task, not the framework. Forgetting it is a quiet

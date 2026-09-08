@@ -811,14 +811,19 @@ One switch flips dev↔prod behavior.
 **Scope grew 2026-09-08, after reading [the prod model's card](qwen3.8-27b-reference.md).** Two
 concrete things now belong here, both currently unrepresented anywhere:
 
-1. **`reserved_output_tokens` must become profile-aware — today's values are 4B-sized.** M4.1 made
-   it a per-domain `ClassVar` (`ui_ux` = 1500), which was derived from measurements on `qwen3:4b`.
-   The prod card's guidance for agentic tasks is **reasoning up to 262,144 tokens and a final
-   response up to 131,072**, with `reasoning_effort` defaulting to **`xhigh`**. A 1500-token floor
-   is not merely conservative there, it is wrong by two orders of magnitude, and the failure mode
-   is silent: the model runs out of room mid-answer. The task-vs-model split still holds — the
-   *domain* knows how long its answer should be, the *profile* knows how much the model spends
-   reasoning to get there — so the reserved figure should combine both, not be replaced by one.
+1. ~~**`reserved_output_tokens` must become profile-aware — today's values are 4B-sized.**~~
+   **✅ DONE 2026-09-08.** `ModelProfile` gained `reasoning_reserve_tokens` (no default — a
+   profile silently inheriting 0 would under-reserve on a thinking model, and the answer just
+   comes back truncated), and `Agent._plan_budget` now reserves
+   `domain.reserved_output_tokens + profile.reasoning_reserve_tokens`. The split is the point:
+   the *domain* owns how long the answer is, the *model* owns what it spends reasoning to get
+   there, so one domain constant stays correct across both tiers. `ui_ux` dropped 1500 → **1200**
+   (the visible review only), and the reservation now resolves to **2,224 on `qwen3:4b`** (1,024
+   reasoning, measured per CLAUDE.md §3) versus **33,968 on `qwen3.8-27b`** (32,768 reasoning).
+   That 32,768 is the one figure here *derived* rather than quoted: the card's own agentic
+   evaluations run this model at `max_tokens=32,768`, and its stated 262,144-token reasoning
+   allowance is a ceiling, not a typical spend. Re-measure against real traces once **M1.6** can
+   reach the model.
 2. **`reasoning_effort` (`xhigh`/`medium`/`low`) is a real, official knob with no home.** It is
    exactly this milestone's kind of setting. Note the card's own warning before assuming lower is
    cheaper: in multi-turn agentic work, reduced effort "may produce faster per-turn responses but

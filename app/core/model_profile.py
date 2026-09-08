@@ -25,6 +25,16 @@ class ModelProfile:
     tool_call_style: ToolCallStyle
     reliability_tier: ReliabilityTier
 
+    # Output tokens this model spends *thinking* before it starts answering, to be held free
+    # on top of whatever the domain reserves for the answer itself (see
+    # `Agent.reserved_output_tokens`). Reasoning is output: it consumes the same budget as the
+    # response, and running out mid-reasoning yields an empty answer, not a short one.
+    #
+    # Deliberately **no default**: a new profile silently inheriting 0 would under-reserve on a
+    # thinking model, and the failure is invisible until an answer comes back truncated. Same
+    # reasoning as `Tool.read_only`.
+    reasoning_reserve_tokens: int
+
 
 # Keyed by exact Ollama tag. Add an entry here whenever a new model is put behind MODEL_NAME —
 # do not branch on model_name anywhere else in the codebase.
@@ -41,6 +51,10 @@ _PROFILES: dict[str, ModelProfile] = {
         supports_vision=False,
         supports_native_tools=True,
         tool_call_style="native",
+        # MEASURED (CLAUDE.md §3): this tag ignores `think: false` and reasons anyway —
+        # 646 tokens for reasoning + answer on one prompt, and 900 tokens of pure reasoning
+        # when `think: true`. 1024 covers the observed spread with room to spare.
+        reasoning_reserve_tokens=1_024,
         reliability_tier="small",
     ),
     # NOT measured — same family as the 4B and almost certainly also tool-capable, but
@@ -52,6 +66,9 @@ _PROFILES: dict[str, ModelProfile] = {
         supports_vision=False,
         supports_native_tools=False,
         tool_call_style="prompt",
+        # Same family as the 4B and never measured either; inherit the 4B's figure rather
+        # than invent a bigger one for a model nobody has run.
+        reasoning_reserve_tokens=1_024,
         reliability_tier="small",
     ),
     # Prod target (decided 2026-08-29). NOT a Qwen3 variant — Qwen3.8 is a newer generation
@@ -75,6 +92,13 @@ _PROFILES: dict[str, ModelProfile] = {
         supports_vision=True,
         supports_native_tools=True,
         tool_call_style="native",
+        # Thinking is ON by default here with `reasoning_effort` defaulting to `xhigh`, and
+        # the card allows reasoning content up to 262,144 tokens — a ceiling, not a typical
+        # spend. 32,768 is taken from the card's own agentic evaluations, which run this model
+        # at `max_tokens=32,768`; it is 12.5% of the native window, which the 262k context can
+        # absorb easily. Revisit against real traces once M1.6 can actually reach the model —
+        # this is the one field here NOT confirmed by a card figure, but derived from one.
+        reasoning_reserve_tokens=32_768,
         reliability_tier="large",
     ),
 }
@@ -87,6 +111,10 @@ _DEFAULT_PROFILE = ModelProfile(
     supports_vision=False,
     supports_native_tools=False,
     tool_call_style="prompt",
+    # Assume it reasons — most current open models do, and reserving room a model turns out
+    # not to need costs only a little context, while reserving none for a model that does
+    # need it truncates the answer.
+    reasoning_reserve_tokens=1_024,
     reliability_tier="small",
 )
 

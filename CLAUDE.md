@@ -224,8 +224,10 @@ that matter here and that family-resemblance guesses got wrong:
   (`xhigh` default / `medium` / `low`), and **`preserve_thinking` is on by default**, retaining
   thinking blocks from *all* prior messages.
 - **Output guidance for agentic tasks: reasoning up to 262,144 tokens, final response up to
-  131,072.** Our `reserved_output_tokens` values were sized from 4B measurements and are almost
-  certainly far too small for this model — see ROADMAP M5.3.
+  131,072.** Handled: `ModelProfile.reasoning_reserve_tokens` carries the model's reasoning cost
+  (1,024 on the 4B, **32,768** on this one) and `Agent.reserved_output_tokens` carries only the
+  domain's answer length, so one domain constant is right on both tiers. Re-measure the 32,768
+  once M1.6 can reach the model — it is derived from the card's eval settings, not quoted.
 - **Serving is vLLM / SGLang / TokenSpeed over an OpenAI-compatible Chat Completions API.** The
   card never mentions Ollama. Prod likely needs a second `ModelProvider`, not a Modelfile — that
   is ROADMAP **M1.6**, and it blocks every "needs the 27B" milestone.
