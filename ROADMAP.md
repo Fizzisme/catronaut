@@ -259,7 +259,7 @@ response_tokens=... duration_s=...`. Verified live against `qwen3:4b`.
 
 **Depends on:** M1.4. ✅
 
-### M1.6 — OpenAI-compatible provider for prod serving — NOT STARTED, BLOCKS ALL PROD WORK
+### [x] M1.6 — OpenAI-compatible provider for prod serving — DONE (2026-09-08)
 
 **Raised 2026-09-08 after reading [the prod model's card](qwen3.8-27b-reference.md). This gap
 was invisible until then, and nothing else in this ROADMAP covers it.**
@@ -271,10 +271,12 @@ API**. Ollama is never mentioned. The long-standing plan of record — "it needs
 private registry on the GPU server" (CLAUDE.md §3, written 2026-08-29 from the 404 alone) — was
 an inference from Ollama being the only backend we had, not from anything the model says.
 
-Build an `OpenAICompatProvider` against the same ABC. M0.2 already put the seam in the right
-place ("so a second backend can be added without touching domain code"), and this milestone is
-the first real test of that claim — every `extract_*` method exists precisely so response-shape
-knowledge stays in the provider. Concretely it must cover:
+Shipped [app/core/model_provider/openai_compat_provider.py](../app/core/model_provider/openai_compat_provider.py).
+M0.2 put the seam in the right place ("so a second backend can be added without touching domain
+code") and **the claim held: not one line of domain code changed.** Every difference was absorbed
+behind the existing `extract_*` methods. Selected by `MODEL_BACKEND=ollama|openai_compat`, built
+in `lifespan._build_model_provider()` — the only place either provider is constructed. What it
+covers:
 - `chat()` against `/v1/chat/completions`, plus the model's own knobs, which have no home today:
   `reasoning_effort` (`xhigh` default / `medium` / `low`), `enable_thinking` via
   `chat_template_kwargs` (**not** Ollama's `think` flag — a different mechanism), and the card's
@@ -289,12 +291,38 @@ knowledge stays in the provider. Concretely it must cover:
   `message.images` array — so `AgentInput.image_base64`'s journey to the wire differs per
   provider. This is also the first point where `supports_vision=True` becomes reachable.
 
-**Depends on:** M0.2 (the ABC). **Blocks:** every milestone marked "BLOCKED ON INFRASTRUCTURE"
-(M9.7, M5.4, M8.4) and any real measurement of the prod model — those were blocked on hardware,
-but they are equally blocked on being able to *talk* to the thing.
-**[4B gap]** Inverted: this milestone exists only for the large tier. Keep `OllamaProvider` as
-the dev path; the point of the ABC is that both can coexist, selected by config, with no domain
-code aware of which is live.
+**Also shipped, beyond the original list:**
+- **`num_ctx` is deliberately NOT sent.** An OpenAI-compatible server fixes its context length
+  at launch, so there is no per-request equivalent. M4.1's budget therefore becomes a
+  *prediction* of what that server will accept rather than something this provider enforces —
+  `lifespan` logs the required minimum at startup, and `ModelProfile.context_window` must be
+  kept in step with how the engine was actually launched. **This is the one real safety
+  regression versus Ollama** and the first thing to verify on a real deployment.
+- **`reasoning_effort`** is plumbed through `OPENAI_REASONING_EFFORT`, unset by default so the
+  model keeps its own `xhigh`. The card's warning is recorded next to the setting: lowering it
+  in multi-turn agentic work can *raise* total latency through insufficient analysis and retries.
+- **`strip_thinking()` moved to `base.py`** and is now shared. It is a Qwen-family property, not
+  a server one, and both backends need the identical treatment of the two `</think>` shapes.
+- **`health()` joined the ABC.** `GET /health` calls it on whatever provider is live, so leaving
+  it as an Ollama-only method would have broken the endpoint on the prod path.
+
+**15 tests** in [tests/test_openai_compat_provider.py](../tests/test_openai_compat_provider.py)
+(116 total), concentrated on where this backend *differs* — a second copy of the shared
+behaviour would only pretend to add confidence. Notably the request payload is asserted through
+an `httpx.MockTransport`: correct endpoint, `chat_template_kwargs` rather than `think`, no
+`num_ctx`/`options`, and client-measured elapsed time.
+
+**⚠ Never verified against a live server** — `qwen3.8-27b` runs nowhere yet. The wire shapes come
+from the model card plus the OpenAI schema vLLM and SGLang implement. **Treat first deployment as
+the verification step**, and re-check `reasoning_content` specifically: exposing it as a separate
+field is a server-level choice, not part of the OpenAI schema.
+
+**Depends on:** M0.2 (the ABC). ✅ **Unblocks:** every milestone marked "BLOCKED ON
+INFRASTRUCTURE" (M9.7, M5.4, M8.4) from the *engineering* side — they remain blocked on the GPU
+box, but no longer on being unable to talk to the thing.
+**[4B gap]** Inverted: this milestone exists only for the large tier. `OllamaProvider` remains
+the dev path; both coexist, selected by config, with **no domain code aware of which is live** —
+which the diff confirms, since none of it changed.
 
 ---
 
@@ -1313,15 +1341,14 @@ NO LONGER ON ANY PATH
                                            handled by M9.1's workspace guard)
 
 BLOCKED ON INFRASTRUCTURE, NOT ENGINEERING
-    M9.7, M5.4, M8.4                     (all need qwen3.8-27b, which is not running anywhere —
-                                           AND need M1.6 before anything can talk to it)
+    M9.7, M5.4, M8.4                     (all need qwen3.8-27b, which is not running anywhere.
+                                           M1.6 removed the engineering half of this block)
     M6.3                                 (needs an embedding model this runner does not have)
 
-PREREQUISITE FOR ANY PROD WORK — added 2026-09-08, engineering not hardware
-    M1.6                                 (OpenAI-compatible provider. The prod model is served by
-                                           vLLM/SGLang over Chat Completions, NOT Ollama — our
-                                           only provider. Buildable now against the ABC; can be
-                                           written and unit-tested before the GPU box exists)
+[x] M1.6                                 (OpenAI-compatible provider — DONE 2026-09-08. The prod
+                                           model is served by vLLM/SGLang over Chat Completions,
+                                           not Ollama. Written and unit-tested without the GPU
+                                           box; never yet run against a live server)
 ```
 
 **Phases 0–2 are fully done, and M4.1 (token budgeter) is done too.** Next up is the critical

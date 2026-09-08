@@ -113,15 +113,21 @@
   to *constrain* a local box. And `ToolExecutor`'s flat 2000-char cap became
   `max_result_bytes`, derived from the live budget's `available` — ROADMAP M2.3 had named M4.1
   as that number's owner. Truncation is byte-wise so it never splits a Vietnamese character.
-- **⚠ NEW 2026-09-08 — `M1.6` (OpenAI-compatible provider) exists and blocks all prod work.**
-  Reading the prod model's card revealed `qwen3.8-27b` is served by **vLLM / SGLang over an
-  OpenAI-compatible Chat Completions API, not Ollama** — and `OllamaProvider` is our only
-  backend. The old plan of record ("needs a Modelfile / private registry") was inferred from
-  Ollama being all we had, not from anything the model says. M1.6 is **buildable and testable
-  now**, before the GPU box exists, and M9.7 / M5.4 / M8.4 are blocked on it as much as on
-  hardware. Two related findings recorded, not built: `reserved_output_tokens` is 4B-sized and
-  wrong for prod by orders of magnitude (→ M5.3), and `preserve_thinking` makes `history` carry
-  hidden reasoning tokens (→ M4.2).
+- **M1.6 (OpenAI-compatible provider) is DONE (2026-09-08).** `qwen3.8-27b` is served by
+  **vLLM / SGLang over Chat Completions, not Ollama** — the old "needs a Modelfile / private
+  registry" plan was inferred from Ollama being our only backend, not from the model.
+  `OpenAICompatProvider` ships alongside `OllamaProvider`, selected by **`MODEL_BACKEND`**
+  (`ollama` default | `openai_compat`), built in `lifespan._build_model_provider()`. **No domain
+  code changed** — M0.2's ABC held. Absorbed here: `choices[0].message`, tool arguments as a
+  **JSON string**, `usage.prompt_tokens`/`completion_tokens`, client-measured duration,
+  `image_url` content blocks, and `chat_template_kwargs.enable_thinking` instead of Ollama's
+  `think`. `strip_thinking()` moved to `base.py` (a Qwen-family property, not a server one) and
+  `health()` joined the ABC (`/health` calls it on whichever provider is live).
+  **⚠ Never run against a live server** — shapes come from the card + the OpenAI schema; treat
+  first deployment as verification, especially `reasoning_content` (a server-level choice).
+  **⚠ `num_ctx` cannot be sent** on this path — the window is a server launch flag, so M4.1's
+  budget becomes a *prediction*. Keep `ModelProfile.context_window` in step with how the engine
+  was launched; `lifespan` logs the required minimum at startup.
 - **Next up:** **M4.2 (message assembly pipeline)** — the next item on the critical path;
   M5.1/M5.2 both need it. Decided for M4.2: build only the segments whose shape is frozen
   (`system` / `history` / `current_input` / `tool_results`), leave `retrieved_context` and
@@ -326,6 +332,12 @@ app/
 │   │   │                       extract_assistant_message() -> the turn AS RE-SENT (reasoning
 │   │   │                       intact — history must use this, not extract_content),
 │   │   │                       extract_usage() -> RunUsage, embed()
+│   │   ├── openai_compat_provider.py
+│   │   │                       (M1.6) PROD path — vLLM/SGLang/TokenSpeed. Selected by
+│   │   │                       MODEL_BACKEND=openai_compat. /v1/chat/completions;
+│   │   │                       choices[0].message; tool args as a JSON string; usage.
+│   │   │                       prompt_tokens; image_url blocks; chat_template_kwargs.
+│   │   │                       enable_thinking; reasoning_effort. num_ctx NOT sendable
 │   │   └── ollama_provider.py  httpx.AsyncClient; error mapping; </think> stripping;
 │   │                           extract_usage() from prompt_eval_count/eval_count/total_duration;
 │   │                           wraps registry schema into Ollama's function envelope; health()
@@ -366,7 +378,8 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `scripts/ui_ux_tool_pack_check.py` (live M2.4 check, all 4 tools + 1 real fetch; none in pytest),
 `tests/test_api.py` (17) + `tests/test_tools.py` (5) + `tests/test_tool_parsing.py` (22) +
 `tests/test_tool_execution.py` (11) + `tests/test_ui_ux_tools.py` (26) +
-`tests/test_token_budget.py` (11, M4.1), `docs/FLOW.md` (see §5 for its English-only exception).
+`tests/test_token_budget.py` (11, M4.1) + `tests/test_openai_compat_provider.py` (15, M1.6),
+`docs/FLOW.md` (see §5 for its English-only exception).
 
 ## 5. Conventions — follow these
 
