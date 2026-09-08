@@ -20,10 +20,17 @@ from pydantic import BaseModel, field_validator
 from app.core.tools.base import Tool
 
 _ALLOWED_SCHEMES = {"http", "https"}
-_MAX_DOWNLOAD_BYTES = 200_000  # raw bytes read before giving up on a huge page
-_MAX_OUTPUT_CHARS = 4_000  # keep well under ToolExecutor's 2000-default is not assumed;
-# this tool caps its own output too so a verbose page doesn't rely solely on the
-# executor's generic truncation to stay reasonable.
+# A network guard, not a context one: it bounds what this tool will *download* before
+# giving up on a huge page, so a hostile URL cannot stream unbounded bytes into memory.
+# Unrelated to the model's window — keep it regardless of which model is configured.
+_MAX_DOWNLOAD_BYTES = 200_000
+
+# There is deliberately NO tool-local output cap. This tool used to trim its own text to
+# 4000 characters, which was a second, competing truncation rule: silent (no marker, so the
+# model could not tell the page had been cut) and blind to the window (~1150 tokens, i.e.
+# 0.4% of a 262k context — it gutted the one tool whose whole job is pulling in reference
+# material, on exactly the model able to read it). `ToolExecutor` owns result truncation and
+# sizes it from the live M4.1 budget; one owner, one rule. See ROADMAP M2.3/M2.4.
 
 
 class DocFetchError(Exception):
@@ -152,5 +159,6 @@ class FetchDocs(Tool):
             raise DocFetchError(f"unsupported content-type {content_type!r}")
 
         body = response.content[:_MAX_DOWNLOAD_BYTES]
-        text = _extract_text(content_type, body)
-        return text[:_MAX_OUTPUT_CHARS]
+        # Returned whole: ToolExecutor trims it to whatever the run's budget still allows,
+        # with a `[truncated]` marker so the model knows it happened.
+        return _extract_text(content_type, body)

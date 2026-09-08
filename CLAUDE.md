@@ -80,24 +80,55 @@
   would be indexed; **M8.3 sandboxing is off the path entirely** now that nothing is built
   server-side. **Read ROADMAP's "Suggested execution order" block, not the phase numbers** — the
   numbers are conceptual layering and deliberately do not match build order.
-- **M4.1 (token budgeter) is done (2026-09-04).** `app/core/token_budget.py`:
-  `count_tokens()` (UTF-8 **bytes**/4, not `len(str)` codepoints — BPE tokenizers operate on
-  bytes, so counting codepoints undercounts Vietnamese/CJK text where 1 codepoint costs 2-4
-  bytes; 15% safety margin on top; no tokenizer dependency, Ollama has no tokenize-only
-  endpoint) and `allocate_budget(profile, configured_num_ctx) -> TokenBudget`
-  (`system`/`retrieved_context`/`history`/`tool_results`/`reserved_output` slots). **Budgets key
-  off `min(profile.context_window, settings.model_num_ctx)`, not the profile alone** — dev's
-  `model_num_ctx` defaults to 4096, well under `qwen3:4b`'s 32768 profile ceiling, and budgeting
-  off the profile would size slots for a window Ollama was never actually given. **A real Qwen
-  tokenizer (HF `tokenizers` lib) was considered and rejected for now** — `qwen3.8-27b`'s vocab
-  isn't publicly confirmed (the tag 404s from Ollama's library), so bundling one verified only
-  against the dev tag would be false precision; revisit once the prod vocab is confirmed.
-  `Agent._new_run_context` now sets `run.token_budget` on every request; nothing reads the slots
-  yet (M4.2/M4.3 are the first consumers). 8 new tests, 86 total, all green.
+- **M4.1 (token budgeter) is done, then REWORKED 2026-09-07 for the 27B-first decision.**
+  `app/core/token_budget.py`: `count_tokens()` (UTF-8 **bytes**/4, not `len(str)` codepoints —
+  BPE tokenizers operate on bytes, so counting codepoints undercounts Vietnamese/CJK text where
+  1 codepoint costs 2-4 bytes; 15% safety margin; no tokenizer dependency, Ollama has no
+  tokenize-only endpoint), `max_text_bytes()` (its inverse, for truncation), and
+  `plan_budget(...) -> TokenBudget`.
+  - **The fraction model is GONE — do not reintroduce it.** The first version split the window
+    into fixed percentages (system 10%, history 30%, …). That is wrong in a way that gets *worse*
+    as the window grows: `system` and `tool_schema` cost what they cost (measured 53 and 420
+    tokens for `ui_ux`) no matter the window, so percentages handed those two **52,428 tokens on
+    a 262k window** and ~209k on a 1M one, for a real need of 473.
+  - **Measure what can be measured; reserve only what cannot.** `available = window −
+    reserved_output − count(system) − count(tool_schema) − count(current_input)`. `available` is
+    one shared pool for history + tool results (+ M6.4 retrieval, + M3.2 skills). They need no
+    pre-split because **M4.3 already defines the sacrifice order** — that order *is* the policy.
+  - `available < 0` is a real, logged state ("this does not fit as composed"), which the fraction
+    model could not express at all.
+  - **`reserved_output` is per-domain, declared as `Agent.reserved_output_tokens` (no default).**
+    A task property, not a model one: `ui_ux` = 1500 (prose + inline reasoning); `site_gen` will
+    be far larger (one file per `write_file` call). It is a **floor** — it never binds on a big
+    window.
+  - **Budget is planned per CALL, not per run** (`Agent._plan_budget`). M5.2 re-runs it every
+    iteration because the tool-result tail grows; a run-start budget is stale by call two.
+  - A real Qwen tokenizer (HF `tokenizers`) was considered and rejected: `qwen3.8-27b`'s vocab
+    isn't publicly confirmed (the tag 404s), so one verified only against the dev tag would be
+    false precision. Revisit once the prod vocab is real.
+  - 92 tests green.
+- **Two hardcoded 4B numbers were removed in the same change** (see §3): `MODEL_NUM_CTX` is now
+  **optional** — unset means "use `ModelProfile.context_window`", so `qwen3:4b` gets its real
+  32768 (was 4096, 1/8) and the 27B gets 262144 with no second setting to remember; set it only
+  to *constrain* a local box. And `ToolExecutor`'s flat 2000-char cap became
+  `max_result_bytes`, derived from the live budget's `available` — ROADMAP M2.3 had named M4.1
+  as that number's owner. Truncation is byte-wise so it never splits a Vietnamese character.
+- **⚠ NEW 2026-09-08 — `M1.6` (OpenAI-compatible provider) exists and blocks all prod work.**
+  Reading the prod model's card revealed `qwen3.8-27b` is served by **vLLM / SGLang over an
+  OpenAI-compatible Chat Completions API, not Ollama** — and `OllamaProvider` is our only
+  backend. The old plan of record ("needs a Modelfile / private registry") was inferred from
+  Ollama being all we had, not from anything the model says. M1.6 is **buildable and testable
+  now**, before the GPU box exists, and M9.7 / M5.4 / M8.4 are blocked on it as much as on
+  hardware. Two related findings recorded, not built: `reserved_output_tokens` is 4B-sized and
+  wrong for prod by orders of magnitude (→ M5.3), and `preserve_thinking` makes `history` carry
+  hidden reasoning tokens (→ M4.2).
 - **Next up:** **M4.2 (message assembly pipeline)** — the next item on the critical path;
-  M5.1/M5.2 both need it. **M9.1 (workspace primitive) and M9.2 (file tools) can still be built in
-  parallel at any time** — pure Python, no model, no loop, exactly like M2.1 and M2.4 needed
-  nothing running.
+  M5.1/M5.2 both need it. Decided for M4.2: build only the segments whose shape is frozen
+  (`system` / `history` / `current_input` / `tool_results`), leave `retrieved_context` and
+  `summarized_history` as *named insertion points* in the order constant, and add
+  `AgentInput.history` (pulled forward from M9.3, typed `list[ChatTurn]` not `list[dict]` — a
+  bare dict lets a client inject `role: "system"`). **M9.1 (workspace primitive) and M9.2 (file
+  tools) can still be built in parallel at any time** — pure Python, no model, no loop.
 - **Do not redo Phase 0 or Phase 1.** The missing `config.py`, missing `model_provider/`, UTF-16
   `requirements.txt`, empty `Dockerfile` and `.env` drift are all **fixed**. `ModelProfile`,
   `RunContext`, usage metrics all exist — don't re-derive them.
@@ -179,8 +210,27 @@ Invariants the code honors — **keep these**:
 
 **On the prod tag:** `qwen3.8-27b` is the decided target. Verified 2026-08-29: it returns **404
 from the public Ollama library** (`registry.ollama.ai/v2/library/qwen3.8-27b`), so it cannot be
-`ollama pull`-ed as-is — it will need a Modelfile or a private registry on the GPU server. Set it
-via `MODEL_NAME`; nothing hardcodes it.
+`ollama pull`-ed as-is. Set it via `MODEL_NAME`; nothing hardcodes it.
+
+**⚠ Its official model card lives at [docs/qwen3.8-27b-reference.md](docs/qwen3.8-27b-reference.md)
+— read it before reasoning about prod behaviour, and do not infer prod behaviour from `qwen3:4b`.**
+`Qwen3.8` is a **new generation** built on Qwen3.5's architecture, **not** a Qwen3 variant. Facts
+that matter here and that family-resemblance guesses got wrong:
+- **262,144 native context, extensible to 1,000,000 via YaRN.** The `_PROFILES` entry carries the
+  native number; only raise it when YaRN is actually configured server-side, because M4.1's
+  budgeter now treats `context_window` as the real window.
+- **Thinking is ON by default**, emitted as *properly delimited* `<think>…</think>` — documented
+  behaviour, not the 4B's bare-closing-tag defect. Depth is tunable via **`reasoning_effort`**
+  (`xhigh` default / `medium` / `low`), and **`preserve_thinking` is on by default**, retaining
+  thinking blocks from *all* prior messages.
+- **Output guidance for agentic tasks: reasoning up to 262,144 tokens, final response up to
+  131,072.** Our `reserved_output_tokens` values were sized from 4B measurements and are almost
+  certainly far too small for this model — see ROADMAP M5.3.
+- **Serving is vLLM / SGLang / TokenSpeed over an OpenAI-compatible Chat Completions API.** The
+  card never mentions Ollama. Prod likely needs a second `ModelProvider`, not a Modelfile — that
+  is ROADMAP **M1.6**, and it blocks every "needs the 27B" milestone.
+- Its token embedding is **248,320 (padded)** — a different tokenizer from Qwen3's, which is why
+  bundling a Qwen3 tokenizer for counting would be wrong, not merely imprecise.
 
 ### Measured behaviour of `qwen3:4b` (tested, not assumed)
 
@@ -211,14 +261,28 @@ memory:
 
 ### Design implications
 
-- **Do not design for the 27B and hope the 4B keeps up.** Verify every prompt, tool schema, and
-  loop against `qwen3:4b` first. If it only works on 27B, it is not done.
+- **⚠ `qwen3.8-27b` is the target; `qwen3:4b` is a local smoke test (decided 2026-09-07 — this
+  REPLACES the previous rule).** The old rule read *"do not design for the 27B and hope the 4B
+  keeps up… if it only works on 27B, it is not done."* That is no longer how this project is
+  judged. Numbers and capability ceilings are tuned for the 27B; the 4B stays useful for catching
+  gross breakage locally, cheaply, before anything touches a GPU box. **A 4B failure is
+  information, not a blocker** — "the 4B could not sequence this" is a measured result to record,
+  not a reason to hold a milestone.
+- **No model's numbers are hardcoded — all of them come from `ModelProfile`.** This is the rule
+  that makes the above safe, and it is the *numeric* extension of §5's existing "never branch on
+  `model_name`". Context window, truncation caps, and reserved output all derive from the profile
+  or from a measurement, never from a constant tuned against whichever model happened to be
+  installed. Two fixed by M4.1: `MODEL_NUM_CTX=4096` (capped every model, including the 4B's own
+  32768 window, at 1/8) and M2.3's flat 2000-char tool-result cap (on a 262k window it truncated
+  a `read_file` of a 500-line file to ~60 lines). Both now derive from the profile and the live
+  budget.
 - **Keep system prompts short and imperative.** One job per prompt, not one mega-prompt.
 - **Never trust raw tool-call JSON from the 4B.** Validate/repair (Pydantic parse → one bounded
   re-ask). A validator must sit between model output and execution.
-- **Budget for reasoning.** Any token budget must assume the 4B burns several hundred tokens
-  reasoning before answering. Do not cap `num_predict` tightly — it truncates mid-reasoning and
-  yields an empty answer (observed).
+- **Budget for reasoning.** Reasoning is output: the Qwen3 family burns several hundred tokens
+  before answering (measured on the 4B). Every domain declares `Agent.reserved_output_tokens`
+  covering both, and it is a **floor, not a cap** — do not cap `num_predict` tightly, it
+  truncates mid-reasoning and yields an empty answer (observed).
 - **Timeouts must be generous.** `MODEL_TIMEOUT_S=600`. A 300s timeout already failed in practice
   on a two-part UI/UX prompt.
 - **Vision stays optional and unblocking.** `UIUXAgent` sends `images`; the text-only dev model
@@ -239,12 +303,15 @@ app/
 │   ├── run_context.py          RunContext(run_id, domain, model_profile, session_id, ...)
 │   ├── exceptions.py           CatronautError tree + register_exception_handlers()
 │   ├── lifespan.py             startup: OllamaProvider + Orchestrator; shutdown: aclose()
-│   ├── agent_base.py           abstract `Agent`; `_new_run_context()` also sets `run.token_budget`
-│   │                           (M4.1); `_build_output()` extracts usage + logs the structured
-│   │                           "done" line (M1.5)
-│   ├── token_budget.py         (M4.1) count_tokens(); allocate_budget(profile, num_ctx) ->
-│   │                           TokenBudget (system/retrieved_context/history/tool_results/
-│   │                           reserved_output); nothing reads the slots yet — M4.2/M4.3 do
+│   ├── agent_base.py           abstract `Agent`; `reserved_output_tokens` (ClassVar, no default);
+│   │                           `_new_run_context()`; `_plan_budget()` -> per-CALL TokenBudget on
+│   │                           run.token_budget (M4.1); `_build_output()` extracts usage + logs
+│   │                           the structured "done" line (M1.5)
+│   ├── token_budget.py         (M4.1) count_tokens() / max_text_bytes() (UTF-8 bytes);
+│   │                           effective_context_window(profile, num_ctx|None);
+│   │                           plan_budget(...) -> TokenBudget{total, reserved_output, system,
+│   │                           tool_schema, current_input, fixed, available}. Measured, NOT
+│   │                           apportioned — no fractions, no per-model constants
 │   ├── orchestrator.py         domain -> agent instance; raises UnknownDomainError
 │   ├── model_provider/
 │   │   ├── base.py             ModelProvider ABC: chat(), aclose(), extract_content(),
@@ -289,8 +356,8 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `scripts/smoke_test.py` + `scripts/tool_call_check.py` (live M2.2 check) +
 `scripts/ui_ux_tool_pack_check.py` (live M2.4 check, all 4 tools + 1 real fetch; none in pytest),
 `tests/test_api.py` (17) + `tests/test_tools.py` (5) + `tests/test_tool_parsing.py` (22) +
-`tests/test_tool_execution.py` (8) + `tests/test_ui_ux_tools.py` (26) +
-`tests/test_token_budget.py` (8, M4.1), `docs/FLOW.md` (see §5 for its English-only exception).
+`tests/test_tool_execution.py` (11) + `tests/test_ui_ux_tools.py` (26) +
+`tests/test_token_budget.py` (11, M4.1), `docs/FLOW.md` (see §5 for its English-only exception).
 
 ## 5. Conventions — follow these
 
@@ -347,6 +414,25 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 
 **Resolved decisions — do not re-ask:**
 
+- **Target model: `qwen3.8-27b`. `qwen3:4b` is a local smoke test, not a gate** (decided
+  2026-09-07). Replaces §3's old "if it only works on 27B, it is not done". A 4B failure is a
+  measured result to record, not a blocker. Consequence: **no model's numbers are hardcoded** —
+  context window, truncation caps and reserved output derive from `ModelProfile` or from a
+  measurement. See §3.
+- **Token budget is measured, not apportioned** (M4.1, reworked 2026-09-07). No fractions. The
+  fraction model wasted 52k tokens on a 262k window for a 473-token real need — its error grows
+  with the window, which is backwards for a 27B target. Do not reintroduce percentage slots.
+- **Phases 0–2 were swept for 4B constants on 2026-09-08 — done, don't redo it.** Removed:
+  `fetch_docs`'s silent 4000-char output cap and `_summarize`'s two-error cap on the repair turn.
+  Re-scoped: M2.1's ≤3-params rule is now labelled a *small-tier convention*, and the CI tests
+  say so. **Kept on purpose** (not model accommodations): `_MAX_DOWNLOAD_BYTES` (DoS guard),
+  `Tool.timeout_s`, `MODEL_TIMEOUT_S`, `_LEAKED_THINK` (kept because it handles **two different**
+  shapes — see §3; the audit's first claim that both models share one "Qwen3-family bug" was
+  wrong), and `_DEFAULT_PROFILE`'s 4096 fallback —
+  though note an **unregistered** model tag now silently runs at 4096, so add a `_PROFILES` entry
+  when pointing `MODEL_NAME` somewhere new. Left alone by decision: `lookup_heuristic`'s enum
+  (M6.4 deletes that tool) and the terse `SYSTEM_PROMPT` (a prompt-quality question, tied to the
+  unowned "system prompt composition" item).
 - Prod model tag: **`qwen3.8-27b`**. Needs a Modelfile / private registry (see §3).
 - Postgres: **coming later**, on the GPU server; a Neon URL is the likely first form.
   Stays commented in `.env.example` until ROADMAP M4.4.
@@ -386,9 +472,10 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
    multi-minute worst-case latency on top of the 44s–600s a single call already takes. Do not
    re-add this without a reason that outweighs that.
 2. **No loop, no RAG, no message assembly pipeline, no session/history, and no agent uses the
-   tool layer.** `UIUXAgent` is still single-shot and stateless. The token budgeter exists (M4.1)
-   and `RunContext.token_budget` is populated on every request, but nothing consumes the slots —
-   that starts with M4.2. The entire tool layer is now done —
+   tool layer.** `UIUXAgent` is still single-shot and stateless. The token budgeter exists and is
+   live (M4.1): `UIUXAgent` plans a budget before its call and `ToolExecutor` already sizes result
+   truncation from it — but nothing *assembles messages* from it yet, which is M4.2. The entire
+   tool layer is now done —
    `Tool`/`ToolRegistry` (M2.1), parsing/repair (M2.2), allowlist/timeout/truncation (M2.3), and
    4 real `ui_ux` tools (M2.4) — and tested, including live against `qwen3:4b`, but **nothing
    calls it**: not wired into `Agent`/`Orchestrator`. Wiring belongs to the loop (M5.1/M5.2);

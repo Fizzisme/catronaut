@@ -159,7 +159,7 @@ All settings come from `.env` (see [.env.example](.env.example)):
 | `APP_ENV` | `dev` | `dev` also returns the raw provider payload in responses |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint |
 | `MODEL_NAME` | `qwen3:4b` | Model tag (prod: `qwen3.8-27b`) |
-| `MODEL_NUM_CTX` | `4096` | Context window, sent explicitly |
+| `MODEL_NUM_CTX` | *(unset)* | Optional. Unset = the model's full window from its `ModelProfile` (`qwen3:4b` → 32768, `qwen3.8-27b` → 262144). Set it only to **constrain** a run below the model's real capability, e.g. a local box short on RAM |
 | `MODEL_TIMEOUT_S` | `600` | Request timeout — CPU inference is slow |
 | `MODEL_THINK` | `false` | Qwen3 hybrid reasoning flag |
 
@@ -169,8 +169,8 @@ See [ROADMAP.md](ROADMAP.md) for the full milestone plan.
 
 - [x] Service skeleton: config, model provider, orchestrator, error handling
 - [x] First agent domain (`ui_ux`, single-shot)
-- [ ] Tool definition + tool-call validation layer
-- [ ] Context/token budgeting
+- [x] Tool definition + tool-call validation layer (not yet called by any agent — that is the loop)
+- [x] Context/token budgeting (measured per call; message assembly is next)
 - [ ] Agent loop (bounded ReAct)
 - [ ] Shared RAG layer across domains
 - [ ] Per-domain LoRA fine-tuning

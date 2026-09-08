@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.model_profile import ModelProfile, get_model_profile
+from app.core.token_budget import effective_context_window
 
 
 class Settings(BaseSettings):
@@ -28,9 +29,17 @@ class Settings(BaseSettings):
     # public Ollama library — it needs a Modelfile / private registry on the GPU box.
     model_name: str = "qwen3:4b"
 
-    # Context window handed to Ollama. Ollama's own default is much smaller and
-    # truncates silently, so this is always sent explicitly.
-    model_num_ctx: int = 4096
+    # Context window handed to Ollama. Ollama's own default is much smaller and truncates
+    # silently, so a value is always sent explicitly — but the value comes from the model
+    # profile, not from here. `None` means "use the whole window this model has"
+    # (`ModelProfile.context_window`), so pointing MODEL_NAME at a bigger model widens the
+    # window with no second setting to remember.
+    #
+    # Set MODEL_NUM_CTX only to *constrain* a run below the model's real capability — a
+    # local CPU box short on RAM. Never to describe the model: that is the profile's job,
+    # and a hardcoded number here silently caps every model behind it (the old 4096 default
+    # held `qwen3:4b` to 1/8 of its own 32768 window).
+    model_num_ctx: int | None = None
 
     # Local CPU inference is slow (measured: ~150s for 158 tokens on qwen3:4b),
     # so the default is generous on purpose.
@@ -49,6 +58,13 @@ class Settings(BaseSettings):
     def model_profile(self) -> ModelProfile:
         """Capabilities of the currently configured model. See app/core/model_profile.py."""
         return get_model_profile(self.model_name)
+
+    @property
+    def effective_num_ctx(self) -> int:
+        """The window actually sent to the backend: the profile's, unless MODEL_NUM_CTX
+        constrains it further. This is the one value to read — `model_num_ctx` alone is the
+        raw override and is `None` in the normal case."""
+        return effective_context_window(self.model_profile, self.model_num_ctx)
 
     @property
     def expose_raw_response(self) -> bool:

@@ -12,9 +12,14 @@ from app.core.model_provider.base import ModelProvider, RunUsage
 
 logger = logging.getLogger(__name__)
 
-# qwen3:4b ignores Ollama's `think: false` and still emits its reasoning inline,
-# terminated by a bare closing tag, with no matching opening tag. Anything before
-# and including that tag is reasoning, not an answer.
+# Handles TWO different shapes, which is why it matches through the first `</think>` rather
+# than a balanced pair:
+#   - `qwen3:4b` ignores Ollama's `think: false` and emits reasoning inline terminated by a
+#     BARE closing tag with no matching opening tag (measured 2026-08-31). A defect.
+#   - `qwen3.8-27b` emits properly delimited `<think>\n...\n</think>\n\n` by design — thinking
+#     is on by default there, with tunable `reasoning_effort`
+#     (docs/qwen3.8-27b-reference.md). Not a defect; the same strip still yields the answer.
+# Either way, everything up to and including that tag is reasoning, not an answer.
 _LEAKED_THINK = re.compile(r"^.*?</think>\s*", re.DOTALL)
 
 
