@@ -812,6 +812,14 @@ step fired.
 **[4B gap]** Summarization is itself a model call, and the 4B summarizes poorly. In dev prefer
 straight dropping with an explicit "[earlier turns omitted]" marker; enable summarization on the
 27B profile.
+**⚠ That last clause has the premise backwards (flagged 2026-09-08).** It assumed the big model
+was where compaction would be *needed*. `qwen3.8-27b` has a **262,144-token native window** —
+64× the old dev cap — so on prod this milestone may essentially never fire, while the 4B, which
+needs it most, is the model least able to summarize. Two consequences before building: confirm
+compaction is reachable on prod at all (it may be dead code there), and note that
+`preserve_thinking` pushes the other way by making history heavier than it looks (M4.2). This
+reinforces the existing "ADD WHEN MEASURED, NOT BEFORE" placement — do not build M4.3 on the
+assumption that a 262k window fills up.
 
 ### M4.4 — Session / conversation store
 Persist conversations by `session_id` (in-memory first, Redis or SQLite later — this is where the
@@ -844,6 +852,14 @@ Every iteration re-runs the budgeter (M4.1) before calling.
 **[4B gap]** `max_iterations`: 2–3 on the 4B, 6–8 on the 27B. Also make "no tool call emitted"
 a *valid terminal state* rather than an error — the 4B often answers directly when it should have
 called a tool, and that should return a usable answer, not a 500.
+**⚠ The "6–8 on the 27B" figure predates knowing what the prod model is (flagged 2026-09-08).**
+It was written when "the 27B" meant a generic Qwen3-class model. `qwen3.8-27b` is built for
+**long-horizon agentic tasks** — "stronger autonomous planning and better handling of environment
+feedback, for more reliable end-to-end task completion" — and is benchmarked on Terminal Bench,
+SWE-bench Pro and long-horizon office work, with an **8-hour timeout** in its own SWE evaluation
+([card](qwen3.8-27b-reference.md)). 6–8 iterations is plausibly far too low for it. **Do not treat
+that number as decided**; set the large-tier cap from a measurement once M1.6 reaches a live
+server. The 2–3 figure for the 4B is unaffected.
 
 ### M5.3 — Loop policy per profile
 Move iteration caps, whether `think` is enabled, and which strategy runs into the `ModelProfile`.
@@ -876,7 +892,15 @@ concrete things now belong here, both currently unrepresented anywhere:
 ### M5.4 — Optional planner (prod only)
 A plan-then-execute strategy for the 27B on multi-part UI/UX audits. Gate strictly behind
 `reliability_tier == "large"`; do not attempt to make it work on the 4B.
-**Depends on:** M5.3, M1.5 (you need metrics to prove it's better).
+**⚠ Question the premise before building this (flagged 2026-09-08).** It was designed when
+"the 27B" was an unknown quantity that might need scaffolding to stay coherent. `qwen3.8-27b`
+advertises **"stronger autonomous planning and better handling of environment feedback"** as a
+headline capability ([card](qwen3.8-27b-reference.md)), so an external planner may be
+redundant — or actively worse, by constraining a model that plans better on its own. The
+existing dependency on M1.5 already says "you need metrics to prove it's better"; that bar is
+now the *first* thing to clear, not the last. Measure the plain M5.2 loop on prod before
+writing a planner.
+**Depends on:** M5.3, M1.5 (you need metrics to prove it's better), **M1.6** to measure at all.
 
 ---
 

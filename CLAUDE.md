@@ -4,9 +4,9 @@
 
 ## STATUS (update this block whenever work lands)
 
-- **Last synced with code:** 2026-09-04
-- **Branch:** `docs/site-gen-phase9` (off `develop`). M2.1–M2.4 and the phase restructure are all
-  merged to `develop` (PRs #7–#11).
+- **Last synced with code:** 2026-09-08
+- **Branch:** `feat/qwen38-prod-support` (off `develop`). Everything through the M4.1 rework and
+  the 27B-first audit is merged to `develop` (PRs #7–#14).
 - **⚠ ROADMAP phases were restructured on 2026-08-31 — milestone numbers moved.** Phase 1 was
   renamed **Runtime** (it is scaffolding, not the agent harness), a new **Phase 3 — Skills** was
   inserted, and the old Phases 3–6 became **4–7**, plus a new **Phase 8 — Extensibility and
@@ -21,8 +21,8 @@
 - **Phase 2 (Tools) is fully done, M2.1 through M2.4 — the whole tool layer through a real tool
   pack.** `Tool`/`ToolRegistry` (M2.1), `parsing.py`/`resolver.py` (M2.2, envelope frozen),
   `policy.py`/`executor.py` (M2.3), and now `app/domains/ui_ux/tools/` — 4 concrete tools:
-  `check_contrast`, `lookup_heuristic`, `format_review`, `fetch_docs` (M2.4, merged). 78 tests
-  pass. **Nothing calls any of this yet** — wiring the tool layer into an agent is the loop's job
+  `check_contrast`, `lookup_heuristic`, `format_review`, `fetch_docs` (M2.4, merged). 116 tests
+  pass repo-wide. **Nothing calls any of this yet** — wiring the tool layer into an agent is the loop's job
   (M5.1/M5.2).
 - **⚠ `qwen3:4b` DOES support native tool calling — measured 2026-08-31, and the profile was
   wrong.** Ollama reports `capabilities: ['completion','tools','thinking']`; a real call returned
@@ -298,8 +298,11 @@ memory:
   truncates mid-reasoning and yields an empty answer (observed).
 - **Timeouts must be generous.** `MODEL_TIMEOUT_S=600`. A 300s timeout already failed in practice
   on a two-part UI/UX prompt.
-- **Vision stays optional and unblocking.** `UIUXAgent` sends `images`; the text-only dev model
-  ignores them. Revisit only once the real 27B runs on prod (decided).
+- **Vision stays optional and unblocking, but it is no longer UNKNOWN.** `UIUXAgent` sends
+  `images`; the text-only dev model ignores them. The prod model **is** a native
+  vision-language model — images *and* video, confirmed by its card — and M1.6's provider
+  already translates `image_base64` into `image_url` content blocks. So what is still
+  unverified is our code path against a live server, not whether the capability exists.
 
 ## 4. Current structure under `app/`
 
@@ -458,7 +461,8 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 - Prod model tag: **`qwen3.8-27b`**. Needs a Modelfile / private registry (see §3).
 - Postgres: **coming later**, on the GPU server; a Neon URL is the likely first form.
   Stays commented in `.env.example` until ROADMAP M4.4.
-- Vision: **stays optional**. Revisit only after the real 27B runs on prod.
+- Vision: **stays optional to send, but confirmed to exist on prod** (card: native VL, images
+  and video). The `image_url` path shipped with M1.6; only live verification is outstanding.
 - Retry: **not implemented here, on purpose** — the Go gateway owns it (see limitation #1 below).
 - Run-log JSONL persistence: **deferred to ROADMAP M7.2**, not built speculatively now — see the
   M1.5 section in `ROADMAP.md` for why.

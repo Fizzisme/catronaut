@@ -6,8 +6,9 @@ class AgentInput(BaseModel):
     image_base64: str | None = Field(
         default=None,
         description=(
-            "Optional base64 screenshot. Requires a vision-capable model; "
-            "qwen3:4b / qwen3:8b are text-only."
+            "Optional base64 screenshot. Requires a vision-capable model: the "
+            "production model understands images and video, while the qwen3:4b / "
+            "qwen3:8b dev tags are text-only and silently ignore this field."
         ),
     )
 
