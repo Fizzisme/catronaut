@@ -4,7 +4,7 @@
 
 ## STATUS (update this block whenever work lands)
 
-- **Last synced with code:** 2026-09-08
+- **Last synced with code:** 2026-09-09
 - **Branch:** `feat/qwen38-prod-support` (off `develop`). Everything through the M4.1 rework and
   the 27B-first audit is merged to `develop` (PRs #7–#14).
 - **⚠ ROADMAP phases were restructured on 2026-08-31 — milestone numbers moved.** Phase 1 was
@@ -135,6 +135,12 @@
   **⚠ `num_ctx` cannot be sent** on this path — the window is a server launch flag, so M4.1's
   budget becomes a *prediction*. Keep `ModelProfile.context_window` in step with how the engine
   was launched; `lifespan` logs the required minimum at startup.
+  **Deploy config: `configs/vllm/`** (2026-09-09) — compose file + sizing guide, flags taken from
+  vLLM's documented launch for `Qwen/Qwen3.6-27B` (same family, same 262k context). ≈70 GB VRAM
+  for a full-context sequence at bf16. **Two silent-failure couplings** documented there:
+  `--served-model-name` must be the literal `qwen3.8-27b` (a `_PROFILES` miss degrades to a
+  4,096-token profile with only a warning), and `--max-model-len` must equal
+  `ModelProfile.context_window`.
 - **Next up:** **M4.2 (message assembly pipeline)** — the next item on the critical path;
   M5.1/M5.2 both need it. Decided for M4.2: build only the segments whose shape is frozen
   (`system` / `history` / `current_input` / `tool_results`), leave `retrieved_context` and
@@ -383,7 +389,9 @@ app/
 
 Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `models/base`, `models/adapters/{ui_ux,code_review}`, `data/{raw,processed,vectorstore}`,
-`evaluation/{datasets/{ui_ux,code_review},results,scripts}`, `configs/`,
+`evaluation/{datasets/{ui_ux,code_review},results,scripts}`,
+`configs/vllm/{docker-compose.yml,README.md}` (M1.6 prod serving: launch flags, VRAM sizing,
+YaRN guidance, and the two settings that fail silently if they disagree with `_PROFILES`),
 `scripts/smoke_test.py` + `scripts/tool_call_check.py` (live M2.2 check) +
 `scripts/ui_ux_tool_pack_check.py` (live M2.4 check, all 4 tools + 1 real fetch) +
 `scripts/openai_compat_check.py` (live M1.6 check, point it at any OpenAI-compatible server;
@@ -523,7 +531,8 @@ none of the `*_check.py` scripts are in pytest),
    `pre_tool_call`. M8.1 is a refactor onto a seam, not a rewrite; don't pre-build it.
 4. **`ModelProvider.embed` raises `NotImplementedError`** by design (ROADMAP M6.3), and the dev
    Ollama runner has embeddings disabled anyway.
-5. **No CI, no linter/formatter config.** `configs/` is still empty.
+5. **No CI, no linter/formatter config.** `configs/` now holds the vLLM deploy config
+   (`configs/vllm/`, added 2026-09-09) but still no lint/format/CI configuration.
 6. **Local pip is broken by an unrelated env var**: `PostgreSQL\15\ssl\certs\ca-bundle.crt` is set
    as the CA bundle and does not exist. Workaround used when installing:
    `REQUESTS_CA_BUNDLE=$(python -c "import certifi;print(certifi.where())")`.

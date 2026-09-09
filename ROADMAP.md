@@ -342,6 +342,28 @@ rejecting them, so this run does *not* prove `chat_template_kwargs.enable_thinki
 same script against vLLM/SGLang (`python scripts/openai_compat_check.py http://gpu-box:8000
 qwen3.8-27b`) to close those — it is written to be pointed anywhere.
 
+**Deploy config shipped 2026-09-09:** [configs/vllm/](../configs/vllm/) — a compose file and a
+sizing/verification guide, so the GPU box needs no re-derivation. It fills `configs/`, which had
+been an empty placeholder since M0.1. Flags follow **vLLM's own documented launch for
+`Qwen/Qwen3.6-27B`** — nearest published model in the family, same 262,144 context — rather than
+guesswork: `--reasoning-parser qwen3`, `--enable-auto-tool-choice --tool-call-parser qwen3_coder`,
+`--max-model-len 262144`. The README marks each item confirmed-vs-inferred; the HF repo id in
+particular is **not** stated by the card and must be corrected on first deployment.
+
+Two couplings are documented there because both fail *silently*:
+- **`--served-model-name` must be the literal `qwen3.8-27b`**, matching `MODEL_NAME` and the
+  `_PROFILES` key. A mismatch does not error — `get_model_profile()` falls back to a
+  conservative 4,096-token profile with a log warning, so a 262k model would run as if it were
+  a 4k one and every budget would be sized against the wrong window.
+- **`--max-model-len` must equal `ModelProfile.context_window`.** This path cannot send a
+  per-request window, so the launch flag *is* the window that M4.1 is predicting against.
+
+VRAM, derived from the card's architecture table (**≈70 GB** for one full-context sequence at
+bf16): 54 GB weights, plus ~16 GiB KV cache — small for a 27B because the hybrid layout has only
+**16 attention layers out of 64**, the rest being Gated DeltaNet with constant state. Fits 2×80 GB
+or 4×48 GB at bf16; 1×80 GB needs FP8. Verify against vLLM's startup log, which prints the real
+KV size.
+
 **Depends on:** M0.2 (the ABC). ✅ **Unblocks:** every milestone marked "BLOCKED ON
 INFRASTRUCTURE" (M9.7, M5.4, M8.4) from the *engineering* side — they remain blocked on the GPU
 box, but no longer on being unable to talk to the thing.
