@@ -1,0 +1,64 @@
+# vLLM serving qwen3.8-27b for the production path (ROADMAP M1.6).
+#
+# Pairs with MODEL_BACKEND=openai_compat. Nothing in this file runs on a dev laptop:
+# see README.md for the VRAM arithmetic (~70 GB at bf16 for a full-context sequence).
+#
+#   docker compose -f configs/vllm/docker-compose.yml up -d
+#   python scripts/openai_compat_check.py http://<host>:8000 qwen3.8-27b
+#
+# The flags below follow vLLM's own documented launch for Qwen/Qwen3.6-27B — the nearest
+# published model in this family, same 262,144 context. Verify them against the engine's
+# startup log on first deployment; see README.md for what is confirmed and what is inferred.
+
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: catronaut-vllm
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      # Weights are tens of GB. Cache them on the host so a container restart is not a
+      # re-download.
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+    environment:
+      # Only needed if the repository is gated. Never commit a real token.
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    ipc: host # vLLM needs a large /dev/shm for tensor parallelism
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command:
+      - --model=Qwen/Qwen3.8-27B # ⚠ repo id NOT confirmed by the model card — see README
+      # ⚠ LOAD-BEARING. This is the name the API reports, the name MODEL_NAME must be set
+      # to, and the key app/core/model_profile.py looks up. A mismatch does NOT fail loudly:
+      # get_model_profile() falls back to a conservative 4,096-token profile with only a log
+      # warning, so a 262k model would quietly behave like a 4k one.
+      - --served-model-name=qwen3.8-27b
+      - --port=8000
+      # Native window. M4.1's budget assumes ModelProfile.context_window matches this exactly
+      # — the openai_compat path cannot send num_ctx per request, so this launch flag IS the
+      # window. Raising one without the other silently breaks the budget in one direction or
+      # the other. For >262,144 see the YaRN section in README.md.
+      - --max-model-len=262144
+      # Splits reasoning out of `content` into `reasoning_content`, which our provider
+      # already carries into history turns (preserve_thinking is on by default for this
+      # model, so losing it would cost reasoning continuity).
+      - --reasoning-parser=qwen3
+      - --enable-auto-tool-choice
+      - --tool-call-parser=qwen3_coder
+      # Set to the number of GPUs. 2 × 80 GB or 4 × 48 GB at bf16; see README.md.
+      - --tensor-parallel-size=${TENSOR_PARALLEL_SIZE:-2}
+      - --gpu-memory-utilization=${GPU_MEMORY_UTILIZATION:-0.90}
+    healthcheck:
+      # The same endpoint OpenAICompatProvider.health() calls, so a healthy container and a
+      # healthy `/health` on this service mean the same thing.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/v1/models || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15m # weight loading on a cold cache is measured in minutes, not seconds
+      retries: 3

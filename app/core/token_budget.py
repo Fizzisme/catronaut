@@ -43,6 +43,12 @@ logger = logging.getLogger(__name__)
 # stdlib HTML parsing) and Ollama exposes no tokenize-only endpoint: extract_usage's
 # prompt_eval_count only exists after a call completes, too late for a pre-send budget.
 #
+# Worth revisiting on the prod backend (M1.6): serving engines like vLLM and SGLang may expose
+# a tokenize endpoint, which would give EXACT counts for the model that actually matters — and
+# for its own vocabulary, sidestepping the whole "which tokenizer" problem. Check before
+# assuming this heuristic is permanent; it stays the fallback either way, since the dev backend
+# has no such endpoint.
+#
 # Counted in UTF-8 BYTES, not `len(str)` codepoints: BPE tokenizers (Qwen included) operate
 # on UTF-8 bytes, so a Vietnamese or CJK character — 1 codepoint but 2-4 bytes — costs more
 # tokens than an ASCII character at the same codepoint count. A codepoint-based chars/4
@@ -112,11 +118,13 @@ def effective_context_window(profile: ModelProfile, configured_num_ctx: int | No
     """The window actually in effect.
 
     `configured_num_ctx` (`Settings.model_num_ctx`) is what `OllamaProvider` sends as
-    `options.num_ctx`. It is **optional on purpose**: unset means "use the whole window the
-    profile describes", so pointing `MODEL_NAME` at a bigger model widens the budget with no
-    second setting to remember. Set it only to *constrain* a run below the model's real
-    capability — a local CPU box short on RAM — never to describe the model, which is
-    `ModelProfile`'s job.
+    `options.num_ctx`. **On the `openai_compat` backend nothing is sent** — that server fixes
+    its context length at launch — so there the result is a *prediction* of what the engine
+    will accept, and `ModelProfile.context_window` must match how it was launched (M1.6).
+    It is **optional on purpose**: unset means "use the whole window the profile describes",
+    so pointing `MODEL_NAME` at a bigger model widens the budget with no second setting to
+    remember. Set it only to *constrain* a run below the model's real capability — a local
+    CPU box short on RAM — never to describe the model, which is `ModelProfile`'s job.
     """
     if configured_num_ctx is None:
         return profile.context_window
@@ -140,10 +148,10 @@ def plan_budget(
     second call.
 
     `tool_schema` is the serialized schema handed to the backend (`json.dumps` of
-    `ToolRegistry.schema()`). Its token cost is an estimate of an estimate — Ollama renders
-    the schema into the model's chat template, so the exact on-wire cost differs — but it is
-    real context, and counting it approximately beats the previous behaviour of counting it
-    not at all.
+    `ToolRegistry.schema()`). Its token cost is an estimate of an estimate — either backend
+    renders the schema into the model's chat template, so the exact on-wire cost differs —
+    but it is real context, and counting it approximately beats the previous behaviour of
+    counting it not at all.
     """
     total = effective_context_window(profile, configured_num_ctx)
 

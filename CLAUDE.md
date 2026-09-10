@@ -4,9 +4,9 @@
 
 ## STATUS (update this block whenever work lands)
 
-- **Last synced with code:** 2026-09-04
-- **Branch:** `docs/site-gen-phase9` (off `develop`). M2.1–M2.4 and the phase restructure are all
-  merged to `develop` (PRs #7–#11).
+- **Last synced with code:** 2026-09-09
+- **Branch:** `feat/qwen38-prod-support` (off `develop`). Everything through the M4.1 rework and
+  the 27B-first audit is merged to `develop` (PRs #7–#14).
 - **⚠ ROADMAP phases were restructured on 2026-08-31 — milestone numbers moved.** Phase 1 was
   renamed **Runtime** (it is scaffolding, not the agent harness), a new **Phase 3 — Skills** was
   inserted, and the old Phases 3–6 became **4–7**, plus a new **Phase 8 — Extensibility and
@@ -21,8 +21,8 @@
 - **Phase 2 (Tools) is fully done, M2.1 through M2.4 — the whole tool layer through a real tool
   pack.** `Tool`/`ToolRegistry` (M2.1), `parsing.py`/`resolver.py` (M2.2, envelope frozen),
   `policy.py`/`executor.py` (M2.3), and now `app/domains/ui_ux/tools/` — 4 concrete tools:
-  `check_contrast`, `lookup_heuristic`, `format_review`, `fetch_docs` (M2.4, merged). 78 tests
-  pass. **Nothing calls any of this yet** — wiring the tool layer into an agent is the loop's job
+  `check_contrast`, `lookup_heuristic`, `format_review`, `fetch_docs` (M2.4, merged). 116 tests
+  pass repo-wide. **Nothing calls any of this yet** — wiring the tool layer into an agent is the loop's job
   (M5.1/M5.2).
 - **⚠ `qwen3:4b` DOES support native tool calling — measured 2026-08-31, and the profile was
   wrong.** Ollama reports `capabilities: ['completion','tools','thinking']`; a real call returned
@@ -113,15 +113,34 @@
   to *constrain* a local box. And `ToolExecutor`'s flat 2000-char cap became
   `max_result_bytes`, derived from the live budget's `available` — ROADMAP M2.3 had named M4.1
   as that number's owner. Truncation is byte-wise so it never splits a Vietnamese character.
-- **⚠ NEW 2026-09-08 — `M1.6` (OpenAI-compatible provider) exists and blocks all prod work.**
-  Reading the prod model's card revealed `qwen3.8-27b` is served by **vLLM / SGLang over an
-  OpenAI-compatible Chat Completions API, not Ollama** — and `OllamaProvider` is our only
-  backend. The old plan of record ("needs a Modelfile / private registry") was inferred from
-  Ollama being all we had, not from anything the model says. M1.6 is **buildable and testable
-  now**, before the GPU box exists, and M9.7 / M5.4 / M8.4 are blocked on it as much as on
-  hardware. Two related findings recorded, not built: `reserved_output_tokens` is 4B-sized and
-  wrong for prod by orders of magnitude (→ M5.3), and `preserve_thinking` makes `history` carry
-  hidden reasoning tokens (→ M4.2).
+- **M1.6 (OpenAI-compatible provider) is DONE (2026-09-08).** `qwen3.8-27b` is served by
+  **vLLM / SGLang over Chat Completions, not Ollama** — the old "needs a Modelfile / private
+  registry" plan was inferred from Ollama being our only backend, not from the model.
+  `OpenAICompatProvider` ships alongside `OllamaProvider`, selected by **`MODEL_BACKEND`**
+  (`ollama` default | `openai_compat`), built in `lifespan._build_model_provider()`. **No domain
+  code changed** — M0.2's ABC held. Absorbed here: `choices[0].message`, tool arguments as a
+  **JSON string**, `usage.prompt_tokens`/`completion_tokens`, client-measured duration,
+  `image_url` content blocks, and `chat_template_kwargs.enable_thinking` instead of Ollama's
+  `think`. `strip_thinking()` moved to `base.py` (a Qwen-family property, not a server one) and
+  `health()` joined the ABC (`/health` calls it on whichever provider is live).
+  **✅ Verified live 2026-09-08, 9/9** via `scripts/openai_compat_check.py` — pointed at
+  **Ollama's own `/v1/chat/completions`**, which exists alongside its native API and makes the
+  protocol testable with no GPU. It **found a real bug**: servers disagree on the reasoning
+  field name (`reasoning_content` on vLLM/SGLang, **`reasoning` on Ollama**, neither in the
+  OpenAI schema), so history turns silently lost reasoning. Fixed to carry whichever key
+  arrives, under its own name. Confirmed live: JSON-string tool arguments, `choices[0].message`,
+  OpenAI usage fields, client-measured duration. **Still unproven** (Ollama ignores unknown
+  request fields): `chat_template_kwargs.enable_thinking`, `reasoning_effort`, and which
+  reasoning name the prod engine uses — re-run the same script against vLLM to close those.
+  **⚠ `num_ctx` cannot be sent** on this path — the window is a server launch flag, so M4.1's
+  budget becomes a *prediction*. Keep `ModelProfile.context_window` in step with how the engine
+  was launched; `lifespan` logs the required minimum at startup.
+  **Deploy config: `configs/vllm/`** (2026-09-09) — compose file + sizing guide, flags taken from
+  vLLM's documented launch for `Qwen/Qwen3.6-27B` (same family, same 262k context). ≈70 GB VRAM
+  for a full-context sequence at bf16. **Two silent-failure couplings** documented there:
+  `--served-model-name` must be the literal `qwen3.8-27b` (a `_PROFILES` miss degrades to a
+  4,096-token profile with only a warning), and `--max-model-len` must equal
+  `ModelProfile.context_window`.
 - **Next up:** **M4.2 (message assembly pipeline)** — the next item on the critical path;
   M5.1/M5.2 both need it. Decided for M4.2: build only the segments whose shape is frozen
   (`system` / `history` / `current_input` / `tool_results`), leave `retrieved_context` and
@@ -222,10 +241,17 @@ that matter here and that family-resemblance guesses got wrong:
 - **Thinking is ON by default**, emitted as *properly delimited* `<think>…</think>` — documented
   behaviour, not the 4B's bare-closing-tag defect. Depth is tunable via **`reasoning_effort`**
   (`xhigh` default / `medium` / `low`), and **`preserve_thinking` is on by default**, retaining
-  thinking blocks from *all* prior messages.
+  thinking blocks from *all* prior messages. Recorded as
+  `ModelProfile.retains_thinking_in_history`. **Consequence: build conversation history from
+  `ModelProvider.extract_assistant_message()`, never from `extract_content()`** — the latter
+  strips `<think>`, which is right for a response body and silently destructive for a history
+  turn (it also undercounts that turn against the budget, since the hidden part still occupies
+  context).
 - **Output guidance for agentic tasks: reasoning up to 262,144 tokens, final response up to
-  131,072.** Our `reserved_output_tokens` values were sized from 4B measurements and are almost
-  certainly far too small for this model — see ROADMAP M5.3.
+  131,072.** Handled: `ModelProfile.reasoning_reserve_tokens` carries the model's reasoning cost
+  (1,024 on the 4B, **32,768** on this one) and `Agent.reserved_output_tokens` carries only the
+  domain's answer length, so one domain constant is right on both tiers. Re-measure the 32,768
+  once M1.6 can reach the model — it is derived from the card's eval settings, not quoted.
 - **Serving is vLLM / SGLang / TokenSpeed over an OpenAI-compatible Chat Completions API.** The
   card never mentions Ollama. Prod likely needs a second `ModelProvider`, not a Modelfile — that
   is ROADMAP **M1.6**, and it blocks every "needs the 27B" milestone.
@@ -285,8 +311,11 @@ memory:
   truncates mid-reasoning and yields an empty answer (observed).
 - **Timeouts must be generous.** `MODEL_TIMEOUT_S=600`. A 300s timeout already failed in practice
   on a two-part UI/UX prompt.
-- **Vision stays optional and unblocking.** `UIUXAgent` sends `images`; the text-only dev model
-  ignores them. Revisit only once the real 27B runs on prod (decided).
+- **Vision stays optional and unblocking, but it is no longer UNKNOWN.** `UIUXAgent` sends
+  `images`; the text-only dev model ignores them. The prod model **is** a native
+  vision-language model — images *and* video, confirmed by its card — and M1.6's provider
+  already translates `image_base64` into `image_url` content blocks. So what is still
+  unverified is our code path against a live server, not whether the capability exists.
 
 ## 4. Current structure under `app/`
 
@@ -316,7 +345,15 @@ app/
 │   ├── model_provider/
 │   │   ├── base.py             ModelProvider ABC: chat(), aclose(), extract_content(),
 │   │   │                       extract_tool_calls() -> [{name,arguments}],
+│   │   │                       extract_assistant_message() -> the turn AS RE-SENT (reasoning
+│   │   │                       intact — history must use this, not extract_content),
 │   │   │                       extract_usage() -> RunUsage, embed()
+│   │   ├── openai_compat_provider.py
+│   │   │                       (M1.6) PROD path — vLLM/SGLang/TokenSpeed. Selected by
+│   │   │                       MODEL_BACKEND=openai_compat. /v1/chat/completions;
+│   │   │                       choices[0].message; tool args as a JSON string; usage.
+│   │   │                       prompt_tokens; image_url blocks; chat_template_kwargs.
+│   │   │                       enable_thinking; reasoning_effort. num_ctx NOT sendable
 │   │   └── ollama_provider.py  httpx.AsyncClient; error mapping; </think> stripping;
 │   │                           extract_usage() from prompt_eval_count/eval_count/total_duration;
 │   │                           wraps registry schema into Ollama's function envelope; health()
@@ -352,12 +389,17 @@ app/
 
 Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 `models/base`, `models/adapters/{ui_ux,code_review}`, `data/{raw,processed,vectorstore}`,
-`evaluation/{datasets/{ui_ux,code_review},results,scripts}`, `configs/`,
+`evaluation/{datasets/{ui_ux,code_review},results,scripts}`,
+`configs/vllm/{docker-compose.yml,README.md}` (M1.6 prod serving: launch flags, VRAM sizing,
+YaRN guidance, and the two settings that fail silently if they disagree with `_PROFILES`),
 `scripts/smoke_test.py` + `scripts/tool_call_check.py` (live M2.2 check) +
-`scripts/ui_ux_tool_pack_check.py` (live M2.4 check, all 4 tools + 1 real fetch; none in pytest),
+`scripts/ui_ux_tool_pack_check.py` (live M2.4 check, all 4 tools + 1 real fetch) +
+`scripts/openai_compat_check.py` (live M1.6 check, point it at any OpenAI-compatible server;
+none of the `*_check.py` scripts are in pytest),
 `tests/test_api.py` (17) + `tests/test_tools.py` (5) + `tests/test_tool_parsing.py` (22) +
 `tests/test_tool_execution.py` (11) + `tests/test_ui_ux_tools.py` (26) +
-`tests/test_token_budget.py` (11, M4.1), `docs/FLOW.md` (see §5 for its English-only exception).
+`tests/test_token_budget.py` (11, M4.1) + `tests/test_openai_compat_provider.py` (15, M1.6),
+`docs/FLOW.md` (see §5 for its English-only exception).
 
 ## 5. Conventions — follow these
 
@@ -436,7 +478,8 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
 - Prod model tag: **`qwen3.8-27b`**. Needs a Modelfile / private registry (see §3).
 - Postgres: **coming later**, on the GPU server; a Neon URL is the likely first form.
   Stays commented in `.env.example` until ROADMAP M4.4.
-- Vision: **stays optional**. Revisit only after the real 27B runs on prod.
+- Vision: **stays optional to send, but confirmed to exist on prod** (card: native VL, images
+  and video). The `image_url` path shipped with M1.6; only live verification is outstanding.
 - Retry: **not implemented here, on purpose** — the Go gateway owns it (see limitation #1 below).
 - Run-log JSONL persistence: **deferred to ROADMAP M7.2**, not built speculatively now — see the
   M1.5 section in `ROADMAP.md` for why.
@@ -488,7 +531,8 @@ Top-level (dirs tracked via `.gitkeep`, contents gitignored):
    `pre_tool_call`. M8.1 is a refactor onto a seam, not a rewrite; don't pre-build it.
 4. **`ModelProvider.embed` raises `NotImplementedError`** by design (ROADMAP M6.3), and the dev
    Ollama runner has embeddings disabled anyway.
-5. **No CI, no linter/formatter config.** `configs/` is still empty.
+5. **No CI, no linter/formatter config.** `configs/` now holds the vLLM deploy config
+   (`configs/vllm/`, added 2026-09-09) but still no lint/format/CI configuration.
 6. **Local pip is broken by an unrelated env var**: `PostgreSQL\15\ssl\certs\ca-bundle.crt` is set
    as the CA bundle and does not exist. Workaround used when installing:
    `REQUESTS_CA_BUNDLE=$(python -c "import certifi;print(certifi.where())")`.

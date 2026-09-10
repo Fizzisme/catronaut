@@ -11,12 +11,11 @@ logger = logging.getLogger(__name__)
 class UIUXAgent(Agent):
     domain = "ui_ux"
 
-    # A review is prose: a few hundred tokens of feedback, plus the several hundred this
-    # model family burns reasoning inline before answering (CLAUDE.md §3 measured 646
-    # tokens for one such answer with `think: false`). Sized for the task, not the window —
-    # on a 262k-token model this never binds; on a 4k one it is what stops the prompt
-    # crowding out the answer.
-    reserved_output_tokens = 1500
+    # The visible review only — actionable feedback on layout, accessibility and
+    # consistency, which runs to roughly a page of prose. Reasoning is NOT counted here: it
+    # is the model's cost, carried by `ModelProfile.reasoning_reserve_tokens`, so this same
+    # number stays right whether a 4B or the 27B writes the review.
+    reserved_output_tokens = 1200
 
     async def handle(self, input: AgentInput) -> AgentOutput:
         run = self._new_run_context()

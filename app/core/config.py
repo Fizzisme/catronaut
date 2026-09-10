@@ -23,8 +23,23 @@ class Settings(BaseSettings):
     app_name: str = "Catronaut"
     app_env: Literal["dev", "prod"] = "dev"
 
-    # --- model serving (Ollama) ---
+    # --- model serving ---
+    # Which backend serves MODEL_NAME. `ollama` is the dev path; `openai_compat` is what
+    # production needs, because qwen3.8-27b is served by vLLM / SGLang / TokenSpeed over an
+    # OpenAI-compatible API and is not an Ollama model at all (ROADMAP M1.6).
+    model_backend: Literal["ollama", "openai_compat"] = "ollama"
+
     ollama_base_url: str = "http://localhost:11434"
+
+    # Used only when MODEL_BACKEND=openai_compat. Point at the serving engine's root; the
+    # provider appends `/v1/chat/completions`.
+    openai_base_url: str = "http://localhost:8000"
+    # Most self-hosted vLLM/SGLang deployments need no key; sent as a bearer token when set.
+    openai_api_key: str | None = None
+    # `xhigh` (the model's own default) / `medium` / `low`. Leave unset to let the server
+    # decide. The card warns that lowering it in multi-turn agentic work can RAISE total
+    # latency through insufficient analysis and retries — measure before turning it down.
+    openai_reasoning_effort: str | None = None
     # dev: qwen3:4b | prod: qwen3.8-27b (decided). The prod tag is not in the
     # public Ollama library — it needs a Modelfile / private registry on the GPU box.
     model_name: str = "qwen3:4b"

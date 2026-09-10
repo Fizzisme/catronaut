@@ -20,11 +20,17 @@ class Agent(ABC):
 
     domain: str = "base"
 
-    # Tokens kept free for this domain's response — reasoning included, since the Qwen3
-    # family reasons inline (CLAUDE.md §3). Deliberately no default: what a response needs
-    # is a property of the *task*, not of the framework. A review is a few hundred tokens of
-    # prose; one `site_gen` file is thousands. Getting it wrong is silent (the model runs out
-    # of room mid-answer), so every domain states its own. See ROADMAP M4.1.
+    # Tokens this domain's **answer** needs — the visible response only, NOT the reasoning
+    # that precedes it. Reasoning cost belongs to the model, not the task, and is carried by
+    # `ModelProfile.reasoning_reserve_tokens`; `_plan_budget` adds the two.
+    #
+    # Splitting them this way is what lets one domain serve both tiers: a UI review is the
+    # same length whether `qwen3:4b` or `qwen3.8-27b` writes it, but the 27B reasons at
+    # `xhigh` by default and spends far more getting there (docs/qwen3.8-27b-reference.md).
+    # A single combined constant would have to be wrong for one of them.
+    #
+    # Deliberately no default: getting it wrong is silent — the model runs out of room
+    # mid-answer — so every domain states its own. See ROADMAP M4.1 / M5.3.
     reserved_output_tokens: ClassVar[int]
 
     def __init__(self, model_provider: ModelProvider):
@@ -54,11 +60,16 @@ class Agent(ABC):
         Called **before every model call**, not once per run: M5.2's loop grows the
         tool-result tail each iteration, so a budget planned at run start is stale by the
         second call.
+
+        The reservation is the domain's answer length **plus** the model's reasoning
+        overhead — see `reserved_output_tokens` and `ModelProfile.reasoning_reserve_tokens`.
         """
         budget = plan_budget(
             profile=run.model_profile,
             configured_num_ctx=settings.model_num_ctx,
-            reserved_output=self.reserved_output_tokens,
+            reserved_output=(
+                self.reserved_output_tokens + run.model_profile.reasoning_reserve_tokens
+            ),
             system=system,
             tool_schema=tool_schema,
             current_input=current_input,

@@ -2,25 +2,14 @@
 
 import json
 import logging
-import re
 from typing import Any
 
 import httpx
 
 from app.core.exceptions import ProviderError
-from app.core.model_provider.base import ModelProvider, RunUsage
+from app.core.model_provider.base import ModelProvider, RunUsage, strip_thinking
 
 logger = logging.getLogger(__name__)
-
-# Handles TWO different shapes, which is why it matches through the first `</think>` rather
-# than a balanced pair:
-#   - `qwen3:4b` ignores Ollama's `think: false` and emits reasoning inline terminated by a
-#     BARE closing tag with no matching opening tag (measured 2026-08-31). A defect.
-#   - `qwen3.8-27b` emits properly delimited `<think>\n...\n</think>\n\n` by design — thinking
-#     is on by default there, with tunable `reasoning_effort`
-#     (docs/qwen3.8-27b-reference.md). Not a defect; the same strip still yields the answer.
-# Either way, everything up to and including that tag is reasoning, not an answer.
-_LEAKED_THINK = re.compile(r"^.*?</think>\s*", re.DOTALL)
 
 
 class OllamaProvider(ModelProvider):
@@ -121,10 +110,28 @@ class OllamaProvider(ModelProvider):
         if not isinstance(content, str) or not content.strip():
             raise ProviderError("Model returned an empty response")
 
-        cleaned = _LEAKED_THINK.sub("", content).strip() if "</think>" in content else content.strip()
+        cleaned = strip_thinking(content)
         if not cleaned:
             raise ProviderError("Model returned reasoning only, with no answer")
         return cleaned
+
+    def extract_assistant_message(self, raw: dict[str, Any]) -> dict[str, Any]:
+        message = raw.get("message")
+        if not isinstance(message, dict):
+            raise ProviderError(f"Unexpected response shape from Ollama: {raw!r:.300}")
+
+        # Content is passed through UNSTRIPPED — see the base-class docstring. Ollama also
+        # splits reasoning into `message.thinking` when the model honours `think: true`, so
+        # carry that too when present rather than losing it on the way back into history.
+        assistant: dict[str, Any] = {
+            "role": message.get("role", "assistant"),
+            "content": message.get("content", ""),
+        }
+        if message.get("thinking"):
+            assistant["thinking"] = message["thinking"]
+        if message.get("tool_calls"):
+            assistant["tool_calls"] = message["tool_calls"]
+        return assistant
 
     def extract_usage(self, raw: dict[str, Any]) -> RunUsage:
         # total_duration is nanoseconds covering the whole request (load + prompt eval + eval) —

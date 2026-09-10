@@ -157,7 +157,11 @@ All settings come from `.env` (see [.env.example](.env.example)):
 | Variable | Default | Purpose |
 |---|---|---|
 | `APP_ENV` | `dev` | `dev` also returns the raw provider payload in responses |
+| `MODEL_BACKEND` | `ollama` | `ollama` (dev) or `openai_compat` (prod — qwen3.8-27b is served by vLLM/SGLang, not Ollama) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama endpoint |
+| `OPENAI_BASE_URL` | `http://localhost:8000` | Serving-engine root, `openai_compat` only |
+| `OPENAI_API_KEY` | *(unset)* | Bearer token, `openai_compat` only; most self-hosted engines need none |
+| `OPENAI_REASONING_EFFORT` | *(unset)* | `xhigh`/`medium`/`low`; unset leaves the model's own default |
 | `MODEL_NAME` | `qwen3:4b` | Model tag (prod: `qwen3.8-27b`) |
 | `MODEL_NUM_CTX` | *(unset)* | Optional. Unset = the model's full window from its `ModelProfile` (`qwen3:4b` → 32768, `qwen3.8-27b` → 262144). Set it only to **constrain** a run below the model's real capability, e.g. a local box short on RAM |
 | `MODEL_TIMEOUT_S` | `600` | Request timeout — CPU inference is slow |

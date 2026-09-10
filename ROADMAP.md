@@ -259,7 +259,7 @@ response_tokens=... duration_s=...`. Verified live against `qwen3:4b`.
 
 **Depends on:** M1.4. ✅
 
-### M1.6 — OpenAI-compatible provider for prod serving — NOT STARTED, BLOCKS ALL PROD WORK
+### [x] M1.6 — OpenAI-compatible provider for prod serving — DONE (2026-09-08)
 
 **Raised 2026-09-08 after reading [the prod model's card](qwen3.8-27b-reference.md). This gap
 was invisible until then, and nothing else in this ROADMAP covers it.**
@@ -271,10 +271,12 @@ API**. Ollama is never mentioned. The long-standing plan of record — "it needs
 private registry on the GPU server" (CLAUDE.md §3, written 2026-08-29 from the 404 alone) — was
 an inference from Ollama being the only backend we had, not from anything the model says.
 
-Build an `OpenAICompatProvider` against the same ABC. M0.2 already put the seam in the right
-place ("so a second backend can be added without touching domain code"), and this milestone is
-the first real test of that claim — every `extract_*` method exists precisely so response-shape
-knowledge stays in the provider. Concretely it must cover:
+Shipped [app/core/model_provider/openai_compat_provider.py](../app/core/model_provider/openai_compat_provider.py).
+M0.2 put the seam in the right place ("so a second backend can be added without touching domain
+code") and **the claim held: not one line of domain code changed.** Every difference was absorbed
+behind the existing `extract_*` methods. Selected by `MODEL_BACKEND=ollama|openai_compat`, built
+in `lifespan._build_model_provider()` — the only place either provider is constructed. What it
+covers:
 - `chat()` against `/v1/chat/completions`, plus the model's own knobs, which have no home today:
   `reasoning_effort` (`xhigh` default / `medium` / `low`), `enable_thinking` via
   `chat_template_kwargs` (**not** Ollama's `think` flag — a different mechanism), and the card's
@@ -289,12 +291,85 @@ knowledge stays in the provider. Concretely it must cover:
   `message.images` array — so `AgentInput.image_base64`'s journey to the wire differs per
   provider. This is also the first point where `supports_vision=True` becomes reachable.
 
-**Depends on:** M0.2 (the ABC). **Blocks:** every milestone marked "BLOCKED ON INFRASTRUCTURE"
-(M9.7, M5.4, M8.4) and any real measurement of the prod model — those were blocked on hardware,
-but they are equally blocked on being able to *talk* to the thing.
-**[4B gap]** Inverted: this milestone exists only for the large tier. Keep `OllamaProvider` as
-the dev path; the point of the ABC is that both can coexist, selected by config, with no domain
-code aware of which is live.
+**Also shipped, beyond the original list:**
+- **`num_ctx` is deliberately NOT sent.** An OpenAI-compatible server fixes its context length
+  at launch, so there is no per-request equivalent. M4.1's budget therefore becomes a
+  *prediction* of what that server will accept rather than something this provider enforces —
+  `lifespan` logs the required minimum at startup, and `ModelProfile.context_window` must be
+  kept in step with how the engine was actually launched. **This is the one real safety
+  regression versus Ollama** and the first thing to verify on a real deployment.
+- **`reasoning_effort`** is plumbed through `OPENAI_REASONING_EFFORT`, unset by default so the
+  model keeps its own `xhigh`. The card's warning is recorded next to the setting: lowering it
+  in multi-turn agentic work can *raise* total latency through insufficient analysis and retries.
+- **`strip_thinking()` moved to `base.py`** and is now shared. It is a Qwen-family property, not
+  a server one, and both backends need the identical treatment of the two `</think>` shapes.
+- **`health()` joined the ABC.** `GET /health` calls it on whatever provider is live, so leaving
+  it as an Ollama-only method would have broken the endpoint on the prod path.
+
+**15 tests** in [tests/test_openai_compat_provider.py](../tests/test_openai_compat_provider.py)
+(116 total), concentrated on where this backend *differs* — a second copy of the shared
+behaviour would only pretend to add confidence. Notably the request payload is asserted through
+an `httpx.MockTransport`: correct endpoint, `chat_template_kwargs` rather than `think`, no
+`num_ctx`/`options`, and client-measured elapsed time.
+
+**✅ Verified live 2026-09-08 — 9/9, and it found a real bug.**
+[scripts/openai_compat_check.py](../scripts/openai_compat_check.py) runs the provider against a
+real OpenAI-compatible server. It can run *today* because **Ollama exposes
+`/v1/chat/completions` alongside its native API**, so the protocol is testable with no new
+infrastructure even though `qwen3.8-27b` itself needs far more VRAM than a laptop has. Against
+Ollama 0.33.3 / `qwen3:4b`:
+
+| Assumption | Result |
+|---|---|
+| `choices[0].message` | ✅ confirmed |
+| `usage.prompt_tokens` / `completion_tokens` | ✅ confirmed (15 / 110 tokens) |
+| duration absent, measured client-side | ✅ confirmed (4.2s) |
+| **tool arguments arrive as a JSON string** | ✅ confirmed — `type=str`, parsed correctly |
+| tool calls round-trip into a history turn | ✅ confirmed |
+| reasoning is exposed as `reasoning_content` | 🔴 **WRONG — bug found and fixed** |
+
+**The bug:** servers that split reasoning out of `content` do not agree on the field name.
+`reasoning_content` is the vLLM/SGLang convention; **Ollama calls it `reasoning`**. Neither is in
+the OpenAI schema. `extract_assistant_message` checked only the former, so on that server every
+history turn silently lost its reasoning — precisely the failure M4.2's `preserve_thinking` work
+exists to prevent, reintroduced one layer down. It now carries whichever keys are present, under
+the name they arrived with, so the turn round-trips to the server that produced it. Regression
+test parametrised over both names.
+
+**Still outstanding, and the script says so:** Ollama ignores unknown request fields rather than
+rejecting them, so this run does *not* prove `chat_template_kwargs.enable_thinking` or
+`reasoning_effort` are honoured, nor which name the prod engine uses for reasoning. Re-run the
+same script against vLLM/SGLang (`python scripts/openai_compat_check.py http://gpu-box:8000
+qwen3.8-27b`) to close those — it is written to be pointed anywhere.
+
+**Deploy config shipped 2026-09-09:** [configs/vllm/](../configs/vllm/) — a compose file and a
+sizing/verification guide, so the GPU box needs no re-derivation. It fills `configs/`, which had
+been an empty placeholder since M0.1. Flags follow **vLLM's own documented launch for
+`Qwen/Qwen3.6-27B`** — nearest published model in the family, same 262,144 context — rather than
+guesswork: `--reasoning-parser qwen3`, `--enable-auto-tool-choice --tool-call-parser qwen3_coder`,
+`--max-model-len 262144`. The README marks each item confirmed-vs-inferred; the HF repo id in
+particular is **not** stated by the card and must be corrected on first deployment.
+
+Two couplings are documented there because both fail *silently*:
+- **`--served-model-name` must be the literal `qwen3.8-27b`**, matching `MODEL_NAME` and the
+  `_PROFILES` key. A mismatch does not error — `get_model_profile()` falls back to a
+  conservative 4,096-token profile with a log warning, so a 262k model would run as if it were
+  a 4k one and every budget would be sized against the wrong window.
+- **`--max-model-len` must equal `ModelProfile.context_window`.** This path cannot send a
+  per-request window, so the launch flag *is* the window that M4.1 is predicting against.
+
+VRAM, derived from the card's architecture table (**≈70 GB** for one full-context sequence at
+bf16): 54 GB weights, plus ~16 GiB KV cache — small for a 27B because the hybrid layout has only
+**16 attention layers out of 64**, the rest being Gated DeltaNet with constant state. Fits 2×80 GB
+or 4×48 GB at bf16; 1×80 GB needs FP8. Verify against vLLM's startup log, which prints the real
+KV size.
+
+**Depends on:** M0.2 (the ABC). ✅ **Unblocks:** every milestone marked "BLOCKED ON
+INFRASTRUCTURE" (M9.7, M5.4, M8.4) from the *engineering* side — they remain blocked on the GPU
+box, but no longer on being unable to talk to the thing.
+**[4B gap]** Inverted: this milestone exists only for the large tier. `OllamaProvider` remains
+the dev path; both coexist, selected by config, with **no domain code aware of which is live** —
+which the diff confirms, since none of it changed.
 
 ---
 
@@ -761,6 +836,19 @@ rather than discover:
   it (typed `ChatTurn`, pulled forward from M9.3) — a `{role, content}` pair alone cannot round-trip
   them.
 
+**✅ The mechanism for the above shipped 2026-09-08, so M4.2 starts with it rather than
+rediscovering it mid-build:**
+- **`ModelProfile.retains_thinking_in_history`** (no default) states what each model expects —
+  `True` for `qwen3.8-27b`, `False` for the Qwen3 tags. M4.2 reads it; it does not re-derive it
+  from the model name.
+- **`ModelProvider.extract_assistant_message(raw)`** returns the assistant turn **as it should be
+  re-sent**: reasoning intact, `tool_calls` preserved. It exists precisely because
+  `extract_content` strips `<think>` — correct for a response body, silently destructive for a
+  history turn. **Build history from this, never from `extract_content`.** Where reasoning lives
+  in the payload is backend-specific (Ollama also splits it into `message.thinking` when `think`
+  is honoured), so it sits behind the ABC like the other `extract_*` methods, and M1.6's provider
+  must implement it too.
+
 **Depends on:** M4.1. Soft dependency on **M1.6** to verify any of the above against the real model.
 
 ### M4.3 — Truncation and compaction strategy
@@ -771,6 +859,14 @@ step fired.
 **[4B gap]** Summarization is itself a model call, and the 4B summarizes poorly. In dev prefer
 straight dropping with an explicit "[earlier turns omitted]" marker; enable summarization on the
 27B profile.
+**⚠ That last clause has the premise backwards (flagged 2026-09-08).** It assumed the big model
+was where compaction would be *needed*. `qwen3.8-27b` has a **262,144-token native window** —
+64× the old dev cap — so on prod this milestone may essentially never fire, while the 4B, which
+needs it most, is the model least able to summarize. Two consequences before building: confirm
+compaction is reachable on prod at all (it may be dead code there), and note that
+`preserve_thinking` pushes the other way by making history heavier than it looks (M4.2). This
+reinforces the existing "ADD WHEN MEASURED, NOT BEFORE" placement — do not build M4.3 on the
+assumption that a 262k window fills up.
 
 ### M4.4 — Session / conversation store
 Persist conversations by `session_id` (in-memory first, Redis or SQLite later — this is where the
@@ -803,6 +899,14 @@ Every iteration re-runs the budgeter (M4.1) before calling.
 **[4B gap]** `max_iterations`: 2–3 on the 4B, 6–8 on the 27B. Also make "no tool call emitted"
 a *valid terminal state* rather than an error — the 4B often answers directly when it should have
 called a tool, and that should return a usable answer, not a 500.
+**⚠ The "6–8 on the 27B" figure predates knowing what the prod model is (flagged 2026-09-08).**
+It was written when "the 27B" meant a generic Qwen3-class model. `qwen3.8-27b` is built for
+**long-horizon agentic tasks** — "stronger autonomous planning and better handling of environment
+feedback, for more reliable end-to-end task completion" — and is benchmarked on Terminal Bench,
+SWE-bench Pro and long-horizon office work, with an **8-hour timeout** in its own SWE evaluation
+([card](qwen3.8-27b-reference.md)). 6–8 iterations is plausibly far too low for it. **Do not treat
+that number as decided**; set the large-tier cap from a measurement once M1.6 reaches a live
+server. The 2–3 figure for the 4B is unaffected.
 
 ### M5.3 — Loop policy per profile
 Move iteration caps, whether `think` is enabled, and which strategy runs into the `ModelProfile`.
@@ -811,14 +915,19 @@ One switch flips dev↔prod behavior.
 **Scope grew 2026-09-08, after reading [the prod model's card](qwen3.8-27b-reference.md).** Two
 concrete things now belong here, both currently unrepresented anywhere:
 
-1. **`reserved_output_tokens` must become profile-aware — today's values are 4B-sized.** M4.1 made
-   it a per-domain `ClassVar` (`ui_ux` = 1500), which was derived from measurements on `qwen3:4b`.
-   The prod card's guidance for agentic tasks is **reasoning up to 262,144 tokens and a final
-   response up to 131,072**, with `reasoning_effort` defaulting to **`xhigh`**. A 1500-token floor
-   is not merely conservative there, it is wrong by two orders of magnitude, and the failure mode
-   is silent: the model runs out of room mid-answer. The task-vs-model split still holds — the
-   *domain* knows how long its answer should be, the *profile* knows how much the model spends
-   reasoning to get there — so the reserved figure should combine both, not be replaced by one.
+1. ~~**`reserved_output_tokens` must become profile-aware — today's values are 4B-sized.**~~
+   **✅ DONE 2026-09-08.** `ModelProfile` gained `reasoning_reserve_tokens` (no default — a
+   profile silently inheriting 0 would under-reserve on a thinking model, and the answer just
+   comes back truncated), and `Agent._plan_budget` now reserves
+   `domain.reserved_output_tokens + profile.reasoning_reserve_tokens`. The split is the point:
+   the *domain* owns how long the answer is, the *model* owns what it spends reasoning to get
+   there, so one domain constant stays correct across both tiers. `ui_ux` dropped 1500 → **1200**
+   (the visible review only), and the reservation now resolves to **2,224 on `qwen3:4b`** (1,024
+   reasoning, measured per CLAUDE.md §3) versus **33,968 on `qwen3.8-27b`** (32,768 reasoning).
+   That 32,768 is the one figure here *derived* rather than quoted: the card's own agentic
+   evaluations run this model at `max_tokens=32,768`, and its stated 262,144-token reasoning
+   allowance is a ceiling, not a typical spend. Re-measure against real traces once **M1.6** can
+   reach the model.
 2. **`reasoning_effort` (`xhigh`/`medium`/`low`) is a real, official knob with no home.** It is
    exactly this milestone's kind of setting. Note the card's own warning before assuming lower is
    cheaper: in multi-turn agentic work, reduced effort "may produce faster per-turn responses but
@@ -830,7 +939,15 @@ concrete things now belong here, both currently unrepresented anywhere:
 ### M5.4 — Optional planner (prod only)
 A plan-then-execute strategy for the 27B on multi-part UI/UX audits. Gate strictly behind
 `reliability_tier == "large"`; do not attempt to make it work on the 4B.
-**Depends on:** M5.3, M1.5 (you need metrics to prove it's better).
+**⚠ Question the premise before building this (flagged 2026-09-08).** It was designed when
+"the 27B" was an unknown quantity that might need scaffolding to stay coherent. `qwen3.8-27b`
+advertises **"stronger autonomous planning and better handling of environment feedback"** as a
+headline capability ([card](qwen3.8-27b-reference.md)), so an external planner may be
+redundant — or actively worse, by constraining a model that plans better on its own. The
+existing dependency on M1.5 already says "you need metrics to prove it's better"; that bar is
+now the *first* thing to clear, not the last. Measure the plain M5.2 loop on prod before
+writing a planner.
+**Depends on:** M5.3, M1.5 (you need metrics to prove it's better), **M1.6** to measure at all.
 
 ---
 
@@ -1295,15 +1412,14 @@ NO LONGER ON ANY PATH
                                            handled by M9.1's workspace guard)
 
 BLOCKED ON INFRASTRUCTURE, NOT ENGINEERING
-    M9.7, M5.4, M8.4                     (all need qwen3.8-27b, which is not running anywhere —
-                                           AND need M1.6 before anything can talk to it)
+    M9.7, M5.4, M8.4                     (all need qwen3.8-27b, which is not running anywhere.
+                                           M1.6 removed the engineering half of this block)
     M6.3                                 (needs an embedding model this runner does not have)
 
-PREREQUISITE FOR ANY PROD WORK — added 2026-09-08, engineering not hardware
-    M1.6                                 (OpenAI-compatible provider. The prod model is served by
-                                           vLLM/SGLang over Chat Completions, NOT Ollama — our
-                                           only provider. Buildable now against the ABC; can be
-                                           written and unit-tested before the GPU box exists)
+[x] M1.6                                 (OpenAI-compatible provider — DONE 2026-09-08. The prod
+                                           model is served by vLLM/SGLang over Chat Completions,
+                                           not Ollama. Written and unit-tested without the GPU
+                                           box; never yet run against a live server)
 ```
 
 **Phases 0–2 are fully done, and M4.1 (token budgeter) is done too.** Next up is the critical
