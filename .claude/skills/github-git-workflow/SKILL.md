@@ -16,13 +16,24 @@ description: Use for creating branches, making commits, pushing changes, opening
 3. Do not overwrite or discard existing user changes.
 
 ## Branches
-- Create a dedicated branch from the default branch.
-- Naming:
+- Long-lived branches:
+  - `main` — released, stable work only; receives merges from `develop`.
+  - `develop` — integration branch; every work branch is created from it and merged back into it.
+- Flow: `develop` → work branch → merge into `develop` → when a milestone is done, merge `develop` into `main`.
+  ```bash
+  git switch develop && git pull
+  git switch -c feature/<short-description>
+  # ... commits ...
+  git switch develop && git merge --no-ff feature/<short-description>
+  # later, when develop is ready to release:
+  git switch main && git merge --no-ff develop
+  ```
+- Work branch naming:
   - `feature/<short-description>`
   - `fix/<short-description>`
   - `docs/<short-description>`
   - `chore/<short-description>`
-- Never commit directly to `main` unless explicitly instructed.
+- Never commit directly to `main` or `develop` unless explicitly instructed.
 
 ## Changes and verification
 1. Keep scope limited to the requested task.
@@ -56,6 +67,7 @@ description: Use for creating branches, making commits, pushing changes, opening
   - tests/checks run and results
   - commit message
   - possible risks or follow-up work
+- Pull requests target `develop`; only release PRs go from `develop` to `main`.
 - Ask for approval before `git push`, opening a PR, merging, force-pushing, rebasing shared branches, or deleting branches.
 - Never force-push a shared branch.
 - PR descriptions must summarize changes, tests, limitations, and any breaking change.
