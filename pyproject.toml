@@ -1,0 +1,44 @@
+[project]
+name = "catronaut-ai-service"
+version = "0.1.0"
+description = "Catronaut agent harness (ai-service)"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.13.1",
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "ruff>=0.16.9",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# docs/ chứa code mẫu trong sách, không phải code của dự án
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+# E/F: pycodestyle + pyflakes (giống ESLint recommended), I: sort import, UP: cú pháp Python mới, B: bug phổ biến
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pyright]
+include = ["app", "tests", "evals"]
+# chỉ cho pyright biết .venv nằm đâu để nó đọc type của các thư viện đã cài
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
