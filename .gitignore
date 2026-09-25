@@ -6,3 +6,5 @@ __pycache__/
 .env
 .env.*
 *.log
+m0_2_results/
+m0_2_results.tgz
