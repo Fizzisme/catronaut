@@ -58,7 +58,8 @@ async def measure(client: AsyncOpenAI, model: str, context: int, max_tokens: int
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     add_endpoint_args(parser)
-    parser.add_argument("--contexts", type=int, nargs="+", default=[8_000, 32_000, 64_000])
+    # 64K would overflow --max-model-len 65536 once the 256 output tokens are added
+    parser.add_argument("--contexts", type=int, nargs="+", default=[8_000, 32_000, 60_000])
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--max-tokens", type=int, default=256)
     args = parser.parse_args()
