@@ -22,6 +22,14 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.9",
 ]
+evals = [
+    "httpx>=0.28.1",
+    "openai>=3.19.2",
+]
+
+[tool.uv]
+# `uv sync` installs these groups by default, so CI type-checks evals/ with its dependencies
+default-groups = ["dev", "evals"]
 
 [tool.ruff]
 line-length = 100
@@ -32,6 +40,10 @@ extend-exclude = ["docs"]
 [tool.ruff.lint]
 # E/F: pycodestyle + pyflakes (giống ESLint recommended), I: sort import, UP: cú pháp Python mới, B: bug phổ biến
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# spike scripts are throwaway measurement code; long data strings are fine there
+"evals/spikes/**" = ["E501"]
 
 [tool.pyright]
 include = ["app", "tests", "evals"]
