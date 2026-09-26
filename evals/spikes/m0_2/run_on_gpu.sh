@@ -9,12 +9,13 @@
 #   MODEL=Qwen/Qwen3.8-27B   base checkpoint; "$MODEL-FP8" is tried first
 #   MAX_LEN=65536            --max-model-len
 #   SKIP_MTP=1               skip the second pass with MTP speculative decoding
+#   PORT=8000                vLLM port (use 8010 on vast.ai, caddy owns 8000)
 #   HF_TOKEN=...             only if the model repository is gated
 set -euo pipefail
 
 MODEL="${MODEL:-Qwen/Qwen3.8-27B}"
 MAX_LEN="${MAX_LEN:-65536}"
-PORT=8000
+PORT="${PORT:-8000}"  # on vast.ai the portal's caddy already owns 8000: use PORT=8010
 URL="http://localhost:${PORT}/v1"
 OUT="m0_2_results"
 mkdir -p "$OUT"
@@ -37,9 +38,12 @@ fi
 log "serving ${SERVE_MODEL} ${QUANT_ARGS[*]:-}"
 
 # --- 3. Download weights and install the client tools in parallel ----------------------------
-export HF_HUB_ENABLE_HF_TRANSFER=1
 pip install -q hf_transfer 2>/dev/null || true
-( huggingface-cli download "$SERVE_MODEL" > "$OUT/download.log" 2>&1 ) &
+# Only turn on the fast downloader when it is really installed (newer huggingface_hub uses hf_xet).
+if python3 -c "import hf_transfer" 2>/dev/null; then export HF_HUB_ENABLE_HF_TRANSFER=1; fi
+# The Python API works on every huggingface_hub version; the `huggingface-cli` command was renamed `hf`.
+( python3 -c "import sys; from huggingface_hub import snapshot_download; snapshot_download(sys.argv[1])" \
+    "$SERVE_MODEL" > "$OUT/download.log" 2>&1 ) &
 download_pid=$!
 if ! command -v uv > /dev/null; then
   curl -LsSf https://astral.sh/uv/install.sh | sh > /dev/null
