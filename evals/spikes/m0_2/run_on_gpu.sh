@@ -29,12 +29,35 @@ log() { echo "[$(( $(date +%s) - started ))s] $*" | tee -a "$OUT/timeline.txt"; 
 } > "$OUT/env.txt" 2>&1 || true
 log "environment: $(tr '\n' ' ' < "$OUT/env.txt")"
 
-# --- 2. Pick the checkpoint: pre-quantised FP8 if it exists, else BF16 quantised on load -----
-if python3 -c "from huggingface_hub import model_info; model_info('${MODEL}-FP8')" 2>/dev/null; then
-  SERVE_MODEL="${MODEL}-FP8"; QUANT_ARGS=()
-else
-  SERVE_MODEL="$MODEL"; QUANT_ARGS=(--quantization fp8)
+# --- 1b. Fail fast when Hugging Face is unreachable (some hosts have broken DNS) ---------------
+hf_code=$(curl -s -o /dev/null -m 15 -w "%{http_code}" https://huggingface.co || true)
+if [[ "$hf_code" != "200" && "$hf_code" != "301" && "$hf_code" != "302" ]]; then
+  log "ABORT: cannot reach huggingface.co (http=${hf_code}, resolves to $(getent hosts huggingface.co | cut -d' ' -f1))."
+  log "This host cannot download the model. Destroy the instance and rent a different host."
+  exit 1
 fi
+
+# --- 2. Pick the checkpoint: pre-quantised FP8 if it exists, else BF16 quantised on load -----
+# Three outcomes: the repo exists (yes), it does not exist (no), or we could not ask (error).
+fp8_status=$(python3 - "${MODEL}-FP8" <<'EOF'
+import sys
+from huggingface_hub import model_info
+from huggingface_hub.errors import RepositoryNotFoundError
+
+try:
+    model_info(sys.argv[1])
+    print("yes")
+except RepositoryNotFoundError:
+    print("no")
+except Exception as exc:  # timeout, DNS, rate limit: not proof that the repo is missing
+    print(f"error {type(exc).__name__}")
+EOF
+)
+case "$fp8_status" in
+  yes) SERVE_MODEL="${MODEL}-FP8"; QUANT_ARGS=() ;;
+  no)  SERVE_MODEL="$MODEL"; QUANT_ARGS=(--quantization fp8) ;;
+  *)   log "ABORT: could not check for ${MODEL}-FP8 (${fp8_status}); rerun when the network is healthy."; exit 1 ;;
+esac
 log "serving ${SERVE_MODEL} ${QUANT_ARGS[*]:-}"
 
 # --- 3. Download weights and install the client tools in parallel ----------------------------
