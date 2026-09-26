@@ -26,15 +26,16 @@ def server_root(base_url: str) -> str:
 
 
 def make_prompt(approx_tokens: int) -> str:
-    """Filler text of roughly `approx_tokens` tokens (about 20 tokens per line).
+    """Filler text of roughly `approx_tokens` tokens (about 31 tokens per line).
 
-    A random tag is put first so that no earlier run can share a prefix-cache entry with it.
-    Read the real size from `usage.prompt_tokens`, not from this estimate.
+    Measured on Qwen3.8 (M0.2): 400 lines -> 11.8K tokens, 1600 lines -> 49.5K tokens, because
+    every digit is its own token. A random tag is put first so that no earlier run can share a
+    prefix-cache entry with it. Read the real size from `usage.prompt_tokens`, not from this.
     """
     tag = uuid.uuid4().hex
     lines = [
         f"Record {i}: the quick brown fox number {i} jumps over lazy dog {i * 7} near gate {i % 13}."
-        for i in range(max(approx_tokens // 20, 1))
+        for i in range(max(approx_tokens // 31, 1))
     ]
     return f"[run {tag}]\n" + "\n".join(lines)
 
