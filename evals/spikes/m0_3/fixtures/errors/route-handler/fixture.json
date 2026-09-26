@@ -1,0 +1,8 @@
+{
+  "base": "starter",
+  "expect": {
+    "status": "rendered",
+    "errorIncludes": "",
+    "finding": "app/**/route.ts is skipped by the preview router and reported in notes"
+  }
+}

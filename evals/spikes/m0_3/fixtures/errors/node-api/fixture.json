@@ -1,0 +1,8 @@
+{
+  "base": "starter",
+  "expect": {
+    "status": "rendered",
+    "errorIncludes": "",
+    "finding": "fs is polyfilled by the bundler (BrowserFS): Node APIs run silently in the preview, so only the static verifier (M0.5) can reject them"
+  }
+}

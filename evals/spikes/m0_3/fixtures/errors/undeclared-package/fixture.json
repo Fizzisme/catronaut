@@ -1,0 +1,8 @@
+{
+  "base": "starter",
+  "expect": {
+    "status": "failed",
+    "errorIncludes": "canvas-confetti",
+    "finding": "an import of a package missing from package.json fails with DependencyNotFoundError"
+  }
+}

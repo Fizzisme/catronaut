@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand: #ff5a1f;
+  --color-ink: #14110f;
+  --font-display: var(--font-playfair), serif;
+  --font-sans: var(--font-inter), system-ui, sans-serif;
+}
+
+body {
+  @apply bg-stone-50 text-ink antialiased;
+}

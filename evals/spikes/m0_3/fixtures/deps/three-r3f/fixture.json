@@ -1,0 +1,1 @@
+{ "base": "starter", "dependencies": { "three": "0.186.1", "@react-three/fiber": "9.8.1", "@react-three/drei": "10.7.9" }, "expect": { "status": "rendered", "errorIncludes": "" } }

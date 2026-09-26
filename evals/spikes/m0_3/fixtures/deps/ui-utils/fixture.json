@@ -1,0 +1,1 @@
+{ "base": "starter", "dependencies": { "lucide-react": "1.48.0", "clsx": "2.1.1", "tailwind-merge": "3.7.0" }, "expect": { "status": "rendered", "errorIncludes": "" } }
