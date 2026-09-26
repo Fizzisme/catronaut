@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>M0.3 preview harness</title>
+    <style>
+      html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+      #bar { padding: 6px 10px; font-size: 12px; background: #111; color: #eee; }
+      #frame-wrap { position: absolute; top: 30px; left: 0; right: 0; bottom: 0; }
+      #frame-wrap iframe { display: block; width: 100% !important; height: 100% !important; border: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="bar">loading…</div>
+    <div id="frame-wrap"><iframe id="preview" title="preview"></iframe></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

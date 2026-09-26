@@ -1,0 +1,1 @@
+{ "base": "starter", "expect": { "status": "rendered", "errorIncludes": "boom during render" } }

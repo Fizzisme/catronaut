@@ -1,0 +1,8 @@
+{
+  "base": "starter",
+  "expect": {
+    "status": "rendered",
+    "errorIncludes": "",
+    "finding": "\"use server\" is ignored: the action silently runs in the browser, so only the static verifier (M0.5) can reject it"
+  }
+}

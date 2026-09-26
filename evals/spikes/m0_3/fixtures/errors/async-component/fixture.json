@@ -1,0 +1,8 @@
+{
+  "base": "starter",
+  "expect": {
+    "status": "rendered",
+    "errorIncludes": "async Client Component",
+    "finding": "a nested async component renders, but React warns (async Client Component, uncached promise) and re-runs it on every render; only page and layout may be async"
+  }
+}

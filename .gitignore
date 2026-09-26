@@ -8,6 +8,12 @@ __pycache__/
 *.log
 m0_2_results/
 m0_2_results.tgz
+m0_3_results/
+node_modules/
+.idea/
+evals/spikes/m0_3/harness/dist/
+# third-party bundler build (GPLv3, 99 MB): downloaded by the README steps, never committed
+evals/spikes/m0_3/vendor/
 
 # raw spike notes and screenshots kept out of the repository
 ref/
