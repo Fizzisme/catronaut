@@ -30,6 +30,17 @@ log() { echo "[$(( $(date +%s) - started ))s] $*" | tee -a "$OUT/timeline.txt"; 
 } > "$OUT/env.txt" 2>&1 || true
 log "environment: $(tr '\n' ' ' < "$OUT/env.txt")"
 
+# --- 1a. Fail fast when something else already holds the GPU ------------------------------------
+# On vast.ai the vLLM template starts its own server (Qwen3.5-9B) and it can still be loading
+# when this script starts; a stale engine also survives `supervisorctl stop vllm`.
+vram_used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d ' ')
+if [[ "${vram_used:-0}" -gt 2000 ]]; then
+  log "ABORT: ${vram_used} MiB of VRAM is already in use, vLLM would not fit."
+  log "Run: supervisorctl stop vllm; ps -eo pid,args | grep -E 'vllm serve|EngineCore' | grep -v grep | awk '{print \$1}' | xargs -r kill -9"
+  log "Wait 20 s, check nvidia-smi is near 0 MiB, then rerun."
+  exit 1
+fi
+
 # --- 1b. Fail fast when Hugging Face is unreachable (some hosts have broken DNS) ---------------
 hf_code=$(curl -s -o /dev/null -m 15 -w "%{http_code}" https://huggingface.co || true)
 if [[ "$hf_code" != "200" && "$hf_code" != "301" && "$hf_code" != "302" ]]; then
