@@ -8,3 +8,7 @@ __pycache__/
 *.log
 m0_2_results/
 m0_2_results.tgz
+
+# raw spike notes and screenshots kept out of the repository
+ref/
+docs/adr/rtx6000pro.txt
