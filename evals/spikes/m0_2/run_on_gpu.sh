@@ -8,6 +8,7 @@
 # Knobs (environment variables):
 #   MODEL=Qwen/Qwen3.8-27B   base checkpoint; "$MODEL-FP8" is tried first
 #   MAX_LEN=65536            --max-model-len
+#   MAX_NUM_SEQS=64          --max-num-seqs (vLLM default 256 exceeds the Mamba cache blocks of this hybrid model)
 #   SKIP_MTP=1               skip the second pass with MTP speculative decoding
 #   PORT=8000                vLLM port (use 8010 on vast.ai, caddy owns 8000)
 #   HF_TOKEN=...             only if the model repository is gated
@@ -83,7 +84,7 @@ serve_and_measure() {
   mkdir -p "$dir"
   log "[$name] starting vLLM"
   vllm serve "$SERVE_MODEL" --served-model-name "$MODEL" --port "$PORT" \
-    --max-model-len "$MAX_LEN" --gpu-memory-utilization 0.92 \
+    --max-model-len "$MAX_LEN" --max-num-seqs "${MAX_NUM_SEQS:-64}" --gpu-memory-utilization 0.92 \
     --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder \
     --enable-prefix-caching --limit-mm-per-prompt '{"image":0,"video":0}' \
     "${QUANT_ARGS[@]}" "$@" > "$dir/server.log" 2>&1 &
