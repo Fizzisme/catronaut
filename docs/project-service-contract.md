@@ -233,14 +233,20 @@ Project if `ai-service` crashes mid-run.
 
 ## Authentication for `ai-service`
 
-`ai-service` calls these endpoints on the user's behalf for the length of a run, which can outlast
-a user access token. Two options, for the `project-service` team to choose:
+Catronaut's existing flow: the client sends its access token to the API gateway, the gateway
+validates and decodes it and forwards `X-User-Id` to the services behind it, which trust that
+header. The `Authorization: Bearer` lines above show the gateway-facing call.
 
-1. **Service credential with an acting user (preferred).** `ai-service` authenticates as itself
-   and names the user in a header set only by `ai-service` (for example `X-Acting-User-Id`);
-   `project-service` applies the same ownership rules as for that user. No expiry problem.
-2. **Forward the user's token.** Simplest, but a run fails when the token expires, and
-   `ai-service` has to hold the token for the length of the run.
+`ai-service` follows the same flow. It receives `X-User-Id` from the gateway with the run request
+and calls `project-service` **directly on the internal network with that same `X-User-Id`**, for
+every request of the run. `project-service` applies its usual ownership rules to that user; it
+needs no new mechanism.
+
+- No token is held by `ai-service`, so a run that lasts minutes cannot fail on token expiry.
+- The trust model is the network's: `project-service` must accept `X-User-Id` only from the
+  gateway and internal services, and the gateway strips any `X-User-Id` sent by a client.
+- `source.kind: "AGENT"` in [Apply changes](#2-apply-changes) marks the agent's writes in the
+  history; it is not an authorisation claim.
 
 ## How `ai-service` uses the API
 
@@ -266,6 +272,9 @@ undo a run   POST files/revert   toRevision: R0
    already plans object storage for source snapshots)?
 2. Retention: keep every revision, or prune intermediate agent revisions after N days and keep
    the labelled run start/end points?
-3. Publishing: when a Project is `PUBLISHED`, which files revision is live? This touches the
-   deferred `project_versions` (Release) work.
-4. Authentication option 1 or 2 above.
+3. Publishing. Publishing stays a user action in the catalog (`DRAFT + PRIVATE` →
+   `PUBLISHED + PUBLIC`); the agent never publishes or changes lifecycle or visibility. When
+   publishing starts to show the project's files or a live demo, **we recommend pinning a
+   `publishedRevision` at publish time**: later agent or user edits then do not change what the
+   public sees until the owner publishes again, and a rollback only moves the pointer. This
+   belongs with the deferred `project_versions` (Release) work.

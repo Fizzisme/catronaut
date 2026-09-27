@@ -110,7 +110,7 @@ preview; ADR-0001 to ADR-0004 are accepted.
 | M1.5 | File tools | `Read` (line-numbered, `offset`/`limit`), `Write` (an existing file must have been read first), `Edit` (exact `old_string` → `new_string`: a unique match or a clear error), `Glob`, `Grep`, `TodoWrite`. Arguments are never silently transformed. |
 | M1.6 | Context engineering | System prompt composed from named, byte-stable sections; KV-cache-friendly ordering; status bar computed in code (iteration n/max, counters, manifest summary); token budget; layered compaction with re-readable handles, built when measurements call for it. |
 | M1.7 | Tracing | One JSON trace per run: model calls (tokens, duration, finish reason), tool calls (argument digest, status, elapsed time) and results. |
-| M1.8 | Run API and streaming | FastAPI async runs with SSE (`thinking` and `message` deltas, `tool_call`, `tool_result`, `file_changed`, `needs_input`, `done`), resume and cancel. A full-site run takes minutes, so runs must be asynchronous. |
+| M1.8 | Run API and streaming | FastAPI async runs with SSE (`thinking` and `message` deltas, `tool_call`, `tool_result`, `file_changed`, `needs_input`, `done`), resume and cancel. A full-site run takes minutes, so runs must be asynchronous. Per the [run API contract](docs/run-api-contract.md): session history in PostgreSQL from the start, and admission control (active-run cap, bounded queue) — ADR-0003 Decisions 11–12. |
 | M1.9 | Dev CLI and playground | `catronaut run "<prompt>"` on `LocalWorkspace`, plus a minimal dev page with a preview, to exercise the harness before the real frontend exists. |
 
 **Exit:** on the real model the agent creates and edits files through tools, with complete traces;

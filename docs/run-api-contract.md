@@ -21,10 +21,15 @@ asynchronous: starting one returns at once and progress arrives over Server-Sent
 ## Run lifecycle
 
 ```
-POST /v1/runs ──► running ──► run_finished { status }
-                    │            done · needs_input · stopped_at_limit · failed · cancelled
-                    └── POST /v1/runs/{id}/cancel ──► (next safe point) ──► cancelled
+POST /v1/runs ──► queued? ──► running ──► run_finished { status }
+                                 │            done · needs_input · stopped_at_limit · failed · cancelled
+                                 └── POST /v1/runs/{id}/cancel ──► (next safe point) ──► cancelled
 ```
+
+- **Admission control.** Only a fixed number of runs are active at once (the GPU budget,
+  ADR-0003 Decision 12). A new run waits in `queued` until a slot frees, and its stream reports
+  its position. When the queue is full the start is refused at once with `429 queue_full`.
+  A user has at most one active or queued run.
 
 - **`needs_input` ends the run.** The agent asked structured questions; the frontend renders a form
   and sends **all answers together** as the input of a new run in the same session. Nothing is
@@ -49,6 +54,7 @@ All paths are behind the gateway. The gateway authenticates the user and forward
 | `GET /v1/runs/{run_id}/events` | SSE stream of the run's events, with replay. |
 | `GET /v1/runs/{run_id}` | Snapshot of the run (status, last `seq`, pending questions). |
 | `POST /v1/runs/{run_id}/cancel` | Ask the run to stop. |
+| `GET /v1/sessions/{session_id}/messages` | The session's conversation, to redraw the chat after a reload. |
 | `POST /v1/projects/{project_id}/preview-reports` | Report what the preview rendered. |
 
 ### `POST /v1/runs`
@@ -91,10 +97,12 @@ instead of starting a second one.
 {
   "run_id": "run_abc",
   "session_id": "ses_456",
-  "status": "running",
+  "status": "queued",
   "events_url": "/v1/runs/run_abc/events"
 }
 ```
+
+`status` is `running` when a slot was free, otherwise `queued`.
 
 ### `GET /v1/runs/{run_id}/events`
 
@@ -133,13 +141,47 @@ data: {"seq":42,"run_id":"run_abc","type":"file_changed","ts":"2026-09-26T10:15:
 }
 ```
 
-`status` is `running` or one of the terminal statuses; `questions` is present only for
+`status` is `queued`, `running` or one of the terminal statuses; `questions` is present only for
 `needs_input`.
 
 ### `POST /v1/runs/{run_id}/cancel`
 
 Empty body. **`202 Accepted`**; the stream later delivers `run_finished` with `status:
-"cancelled"`. Cancelling a finished run is a no-op that returns `202` as well.
+"cancelled"`. A queued run is cancelled at once. Cancelling a finished run is a no-op that returns
+`202` as well.
+
+### `GET /v1/sessions/{session_id}/messages`
+
+Query: `before=<message_id>` and `limit` (1–100, default 50), newest first.
+
+```json
+{
+  "items": [
+    {
+      "id": "msg_2",
+      "run_id": "run_abc",
+      "role": "assistant",
+      "text": "Before I start: a few questions about the site.",
+      "questions": { "question_set_id": "qs_789", "items": [ … ] },
+      "created_at": "2026-09-26T10:15:40.771Z"
+    },
+    {
+      "id": "msg_1",
+      "run_id": "run_abc",
+      "role": "user",
+      "input": { "kind": "message", "text": "Build a landing page for a coffee roastery" },
+      "created_at": "2026-09-26T10:14:51.004Z"
+    }
+  ],
+  "has_more": false
+}
+```
+
+A user message carries the run's `input` (a message or the answers to a question form); an
+assistant message carries the text the user saw and, for `needs_input`, the questions. Steps and
+tool calls are not part of the history; they live in the run's event stream while it is kept.
+Sessions are stored durably (ADR-0003 Decision 11), so the history survives a restart of
+`ai-service`.
 
 ## Events
 
@@ -164,7 +206,8 @@ step_finished
 
 | `type` | `data` | Notes |
 |---|---|---|
-| `run_started` | `{ session_id, project_id, base_revision }` | Always `seq` 1. `base_revision` is the `project-service` revision the run started from. |
+| `run_queued` | `{ position }` | Only for a queued run, before `run_started`; sent again when the position changes. `position` 1 is next. |
+| `run_started` | `{ session_id, project_id, base_revision }` | The first event of a run that was not queued. `base_revision` is the `project-service` revision the run started from. |
 | `run_finished` | `{ status, reason?, questions?, revision?, usage }` | Always the last event. See [below](#run_finished). |
 
 ### Steps and model output
@@ -235,10 +278,10 @@ land. A tool the frontend does not know is shown by `name` only.
   **100 ms**.
 - `usage` is sent at most **twice per second** while the model generates, and once at the end of
   every model call.
-- **Thinking display** is a server setting. When it is off, `thinking_delta` is not sent;
-  `thinking_started` and `thinking_finished` still are, so "Thought for 12 s" still shows. Raw
-  reasoning can echo parts of the system prompt; whether production shows it is an owner decision
-  (ADR-0003).
+- **Thinking display** is a server setting: **off in production**, on for development and for
+  admin users (ADR-0003 Decision 10). When it is off, `thinking_delta` is not sent;
+  `thinking_started`, `thinking_finished` and `usage` still are, so the live token count and
+  "Thought for 12 s · 850 tokens" still show. The full reasoning is always kept in the run's trace.
 
 ### Rules for the client
 
@@ -306,9 +349,10 @@ Error responses have the body `{ "error": { "code": "...", "message": "..." } }`
 | 400 | `invalid_request` | Malformed body; answers that do not match the pending `question_set_id`. |
 | 403 | `forbidden` | The user may not access this project, session or run. |
 | 404 | `not_found` | Unknown project, session or run. |
-| 409 | `run_active` | The project already has an active run; the body includes its `run_id`. |
+| 409 | `run_active` | The project, or the user, already has an active or queued run; the body includes its `run_id`. |
 | 410 | `events_expired` | Replay requested after the retention window. |
 | 423 | `project_locked` | The project is leased by another holder in `project-service`. |
+| 429 | `queue_full` | Every run slot is busy and the queue is full; retry later. |
 | 429 | `rate_limited` | Gateway or per-user quota (M6.1). |
 
 ## Gateway requirements
@@ -319,9 +363,7 @@ Error responses have the body `{ "error": { "code": "...", "message": "..." } }`
 - `EventSource` cannot set headers, so authentication for the events endpoint must work with a
   cookie (or the frontend uses a fetch-based SSE client).
 - Forward `X-User-Id`, `Idempotency-Key` and `Last-Event-ID`; strip any `X-User-Id` sent by the
-  client.
-- Forward `Authorization` as well: `ai-service` calls `project-service` on the user's behalf
-  (ADR-0003).
+  client. `ai-service` passes the same `X-User-Id` on to `project-service` (ADR-0003 Decision 13).
 
 ## Versioning
 

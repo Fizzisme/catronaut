@@ -24,7 +24,10 @@ so they have to be settled first. The inputs:
 - `project-service` exists, but its Phase 1 API is a **catalog** (project metadata, lifecycle,
   discovery). It has no files, no file history and no lock. It does have an optimistic
   concurrency pattern (`ETag` / `If-Match` / `412` on `row_version`) and an `ApiResponse<T>`
-  envelope.
+  envelope. Publishing is a user action in that catalog: a new Project is `DRAFT + PRIVATE`, and
+  publishing makes it `PUBLISHED + PUBLIC`.
+- Authentication: the gateway validates the user's access token, decodes it and forwards
+  `X-User-Id` to the services behind it, which trust that header.
 
 ## Options considered
 
@@ -90,27 +93,45 @@ so they have to be settled first. The inputs:
    semantics (revisions, atomic batches, lease) locally, so Phase 1 proceeds and the
    `project-service` adapter is written when the module exists.
 
+Decisions 10–14 settle the questions left open by the first draft (owner, 2026-09-27):
+
+10. **Thinking is summarised in production.** The live token count and "Thought for 12 s ·
+    850 tokens" always show; the reasoning text streams only in development and for admin users.
+    Raw reasoning can echo the system prompt, skills or untrusted tool output, and it is most of
+    the output tokens, so hiding it also lightens the stream. Traces keep it in full.
+11. **Sessions are durable from M1.8, not M6.2.** `ai-service` stores each session's messages and
+    runs in PostgreSQL. Because `needs_input` ends the run (Decision 2), the next run rebuilds its
+    context from the session history; kept in memory, a restart or deploy while the user fills in
+    a question form would lose the conversation. The frontend redraws the chat from the same data
+    (`GET /v1/sessions/{id}/messages`).
+12. **Admission control with a bounded queue.** A fixed number of runs is active at once; beyond
+    it runs wait as `queued` and the stream reports their position; a full queue refuses new runs
+    at once with `429 queue_full`; a user has at most one active or queued run. Starting values:
+    **3–4 active runs** on a 96 GB GPU (ADR-0001: ~36 tok/s each for 3 users; at 16 sessions
+    every run slows to ~16 tok/s with a ~12 s TTFT) and a **queue of 20**, both tuned from
+    measurements. Letting every run in would slow all of them together; refusing whenever the
+    slots are busy would fail users the system could have served a minute later.
+13. **`ai-service` authenticates to `project-service` with the gateway's `X-User-Id`.** It calls
+    `project-service` directly on the internal network with the `X-User-Id` it received for the
+    run, like every other service behind the gateway. It holds no token, so no run fails on token
+    expiry. This relies on `project-service` accepting that header only from inside the network.
+14. **Publishing is outside the agent.** The agent writes files only; it never publishes or
+    changes a Project's lifecycle or visibility, and those actions are not in its tool set. We
+    recommend that `project-service` pin a `publishedRevision` at publish time once published
+    Projects expose their files (requirements, open question 3).
+
 ## Open questions
 
-1. **Thinking in production.** Raw reasoning can echo parts of the system prompt. Show it, show
-   only "Thought for 12 s · 850 tokens", or show it to some users? The contract supports all
-   three through a server setting.
-2. **Authentication towards `project-service`.** A service credential with an acting user id
-   (preferred) or the user's forwarded token, which can expire mid-run. For the
-   `project-service` team.
-3. **Publishing.** Which files revision is live for a `PUBLISHED` Project. For the
-   `project-service` team; it touches their deferred Release work.
-4. **Session history.** Where the chat history the frontend shows after a reload is read from
-   (`ai-service` sessions, M6.2). Not needed for Phase 1.
-5. **Queueing.** With the GPU sized for a few concurrent runs (ADR-0001), whether a run can wait
-   in a `queued` status or is refused with `429`. Settled with quotas in M6.1.
+1. For the `project-service` team: the files module itself, its storage and retention, and the
+   `publishedRevision` recommendation ([requirements](../project-service-contract.md#open-questions-for-the-project-service-team)).
 
 ## Consequences
 
 - The frontend can build the chat, the step view, the question form and the preview against
   part (a) now. Event types can be added later without breaking it.
-- `ai-service` keeps run state (event log, active run per project) in memory in Phase 1; any
-  instance being able to serve any stream needs shared state (Redis, M6.1).
+- Sessions are in PostgreSQL from M1.8, so Phase 1 already needs a database. Live run state (the
+  event log, active runs, the queue) stays in memory in Phase 1; any instance being able to serve
+  any stream needs shared state (Redis, M6.1).
 - Phase 1 depends on nobody: `LocalWorkspace` stands in for `project-service`. The risk moves to
   the day the adapter is written against the real module; the contract keeps that small.
 - `tool_call_started` early and `cached_tokens` depend on what vLLM streams for Qwen3.8; M1.1
