@@ -223,6 +223,7 @@ after prompt, tool, constraint and context fixes have been tried.
 | GSAP forbids use in no-code animation tools (M0.3). | Owner decision (ADR-0002 open question 2); meanwhile `motion` instead of GSAP. |
 | Gateway timeouts vs long-lived SSE runs. | Settled in M0.4: event replay with `Last-Event-ID` and a 15 s heartbeat (ADR-0003 Decision 3). |
 | `project-service` Phase 1 has no files, file history or lease (M0.4). | `files` module requested (ADR-0003 Decision 7); `LocalWorkspace` implements the same semantics so Phase 1 does not wait. |
+| Services trust `X-User-Id` by convention; the network does not enforce it (gateway review, M0.4). | `ai-service` and `project-service` reachable only from the internal network (ADR-0003 Decision 13); verified in M6.4. |
 | The user edits files while a run is in progress. | Project lease and optimistic concurrency (M0.4, M1.4). |
 
 ## 9. Sources

@@ -1,7 +1,8 @@
 # ADR-0003 — Service contracts: the run API and project files
 
-- **Status:** Proposed 2026-09-27. Part (a) is ready for the frontend and gateway teams; part (b)
-  waits for the `project-service` team to accept or amend the files module.
+- **Status:** Proposed 2026-09-27. Part (a) was reviewed by the gateway team on 2026-09-27; the
+  gateway changes it needs before M1.8 are listed in the contract. Part (b) waits for the
+  `project-service` team to accept or amend the files module.
 - **Milestone:** M0.4 (ROADMAP §7, Phase 0)
 - **Hands over to:** the frontend and gateway teams ([run API contract](../run-api-contract.md));
   the `project-service` team ([project files requirements](../project-service-contract.md)).
@@ -27,7 +28,10 @@ so they have to be settled first. The inputs:
   envelope. Publishing is a user action in that catalog: a new Project is `DRAFT + PRIVATE`, and
   publishing makes it `PUBLISHED + PUBLIC`.
 - Authentication: the gateway validates the user's access token, decodes it and forwards
-  `X-User-Id` to the services behind it, which trust that header.
+  `X-User-Id` (plus `X-User-Email` and `X-User-Roles`) to the services behind it, which trust
+  that header. Browser calls go through a Next.js BFF that holds the tokens; the gateway accepts
+  `Authorization: Bearer` only, so the events stream uses a fetch-based SSE client, not
+  `EventSource`.
 
 ## Options considered
 
@@ -96,7 +100,8 @@ so they have to be settled first. The inputs:
 Decisions 10–14 settle the questions left open by the first draft (owner, 2026-09-27):
 
 10. **Thinking is summarised in production.** The live token count and "Thought for 12 s ·
-    850 tokens" always show; the reasoning text streams only in development and for admin users.
+    850 tokens" always show; the reasoning text streams only in development and for users whose
+    `X-User-Roles` contains the role configured for it.
     Raw reasoning can echo the system prompt, skills or untrusted tool output, and it is most of
     the output tokens, so hiding it also lightens the stream. Traces keep it in full.
 11. **Sessions are durable from M1.8, not M6.2.** `ai-service` stores each session's messages and
@@ -114,7 +119,10 @@ Decisions 10–14 settle the questions left open by the first draft (owner, 2026
 13. **`ai-service` authenticates to `project-service` with the gateway's `X-User-Id`.** It calls
     `project-service` directly on the internal network with the `X-User-Id` it received for the
     run, like every other service behind the gateway. It holds no token, so no run fails on token
-    expiry. This relies on `project-service` accepting that header only from inside the network.
+    expiry. The gateway strips client-sent `X-User-Id` and `Authorization`, but trusting the
+    header "only from the gateway" is a convention the network does not enforce yet (gateway
+    review, 2026-09-27): **`ai-service` and `project-service` must not be reachable from outside
+    the internal network**, a deployment requirement checked in M6.4.
 14. **Publishing is outside the agent.** The agent writes files only; it never publishes or
     changes a Project's lifecycle or visibility, and those actions are not in its tool set. We
     recommend that `project-service` pin a `publishedRevision` at publish time once published

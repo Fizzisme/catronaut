@@ -1,6 +1,7 @@
 # Run API contract (frontend ↔ `ai-service`)
 
-- **Version:** v1 draft · 2026-09-26 · from M0.4 (ADR-0003)
+- **Version:** v1 draft · 2026-09-27 · from M0.4 (ADR-0003); reviewed by the gateway team
+  2026-09-27 (see [Gateway and BFF](#gateway-and-bff))
 - **Audience:** the frontend team and the API gateway team; `ai-service` implements it in M1.8.
 
 The frontend talks to `ai-service` through the API gateway. A **run** is one agent turn: it starts
@@ -44,9 +45,13 @@ POST /v1/runs ──► queued? ──► running ──► run_finished { statu
 
 ## Endpoints
 
-All paths are behind the gateway. The gateway authenticates the user and forwards `X-User-Id`;
-`ai-service` trusts that header only from the gateway. Request and response bodies are JSON
-(UTF-8) unless stated otherwise.
+Paths in this document are `ai-service` paths. Publicly they sit under the gateway prefix
+`/api/ai`, which the gateway strips: `/api/ai/v1/runs` reaches `ai-service` as `/v1/runs`. URLs
+the API returns, such as `events_url`, are `ai-service` paths as well; the frontend puts its own
+base in front. In the browser every call goes through the Next.js BFF, which adds
+`Authorization: Bearer`; the gateway verifies the token and forwards the user's identity (see
+[Gateway and BFF](#gateway-and-bff)). Request and response bodies are JSON (UTF-8) unless stated
+otherwise.
 
 | Method and path | Purpose |
 |---|---|
@@ -106,7 +111,8 @@ instead of starting a second one.
 
 ### `GET /v1/runs/{run_id}/events`
 
-Response `Content-Type: text/event-stream`. Each event is sent as:
+Response headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache`,
+`X-Accel-Buffering: no`. Each event is sent as:
 
 ```
 id: 42
@@ -117,7 +123,14 @@ data: {"seq":42,"run_id":"run_abc","type":"file_changed","ts":"2026-09-26T10:15:
 
 - **Replay.** The stream starts after the `Last-Event-ID` header, or after `?after=<seq>`, or from
   the beginning when neither is given. A reconnecting client therefore never loses or duplicates
-  an event. `EventSource` sends `Last-Event-ID` on its own when it reconnects.
+  an event.
+- **The client sends the resume point itself.** The frontend uses a fetch-based SSE client
+  through the BFF, which, unlike `EventSource`, does not send `Last-Event-ID` on its own. On every
+  reconnect it sends `Last-Event-ID` (or `?after=<seq>`) with the last `seq` it applied.
+- **Streams also end early**: a gateway restart (open streams close after 5 s of graceful
+  shutdown), a network loss, or a BFF restart. Reconnect with the resume point. The access token
+  is checked only when a stream connects, so a long stream survives token expiry; a reconnect
+  that gets `401` refreshes the token and reconnects.
 - **Heartbeat.** A comment line `: ping` every **15 s**. A single model call can stay silent for
   more than 13 s at long context (ADR-0001), so without it idle-timeouts would cut the stream.
 - The server **closes the stream after `run_finished`**. Closing or losing the stream does **not**
@@ -279,7 +292,8 @@ land. A tool the frontend does not know is shown by `name` only.
 - `usage` is sent at most **twice per second** while the model generates, and once at the end of
   every model call.
 - **Thinking display** is a server setting: **off in production**, on for development and for
-  admin users (ADR-0003 Decision 10). When it is off, `thinking_delta` is not sent;
+  users whose `X-User-Roles` (forwarded by the gateway) contains the role configured for it
+  (ADR-0003 Decision 10). When it is off, `thinking_delta` is not sent;
   `thinking_started`, `thinking_finished` and `usage` still are, so the live token count and
   "Thought for 12 s · 850 tokens" still show. The full reasoning is always kept in the run's trace.
 
@@ -340,9 +354,16 @@ An empty pair of error lists means the render succeeded. **`202 Accepted`**. Lim
 the frontend truncates stacks to their first 40 lines and sends at most 20 errors per list.
 Screenshots are not part of v1; they are added for M5.4 as a separate upload.
 
+- **Frequency.** At most one report every **2 s** per project; when renders settle faster, only
+  the latest is sent. All `/api/ai` calls share one per-user rate limit at the gateway.
+- **Retries are safe.** A report with the same `basis` and `settled` as an earlier one replaces
+  it, so the frontend can resend after a network error without an idempotency key.
+
 ## Errors
 
-Error responses have the body `{ "error": { "code": "...", "message": "..." } }`.
+Errors from `ai-service` have the body `{ "error": { "code": "...", "message": "..." } }`.
+`ai-service` returns 5xx only for transient failures, because the gateway retries `GET` requests
+on 500, 502, 503 and 504.
 
 | HTTP | `code` | When |
 |---|---|---|
@@ -353,17 +374,63 @@ Error responses have the body `{ "error": { "code": "...", "message": "..." } }`
 | 410 | `events_expired` | Replay requested after the retention window. |
 | 423 | `project_locked` | The project is leased by another holder in `project-service`. |
 | 429 | `queue_full` | Every run slot is busy and the queue is full; retry later. |
-| 429 | `rate_limited` | Gateway or per-user quota (M6.1). |
 
-## Gateway requirements
+### Errors from the gateway
 
-- Do not buffer `text/event-stream` responses; forward each event as it arrives.
-- Idle timeout on SSE connections of **at least 30 s** (twice the heartbeat). A maximum connection
-  lifetime is fine: clients reconnect with `Last-Event-ID`.
-- `EventSource` cannot set headers, so authentication for the events endpoint must work with a
-  cookie (or the frontend uses a fetch-based SSE client).
-- Forward `X-User-Id`, `Idempotency-Key` and `Last-Event-ID`; strip any `X-User-Id` sent by the
-  client. `ai-service` passes the same `X-User-Id` on to `project-service` (ADR-0003 Decision 13).
+The gateway answers some requests itself, in its own shapes. The frontend tells them apart from
+`ai-service` errors by the body: only `ai-service` errors have `error.code`.
+
+| HTTP | Body | When | Client action |
+|---|---|---|---|
+| 401 | `{"message": …}` or `{"error": …}` | Missing or expired access token | Refresh the token and retry. |
+| 429 | `{"error": "rate limit exceeded"}` | The per-user rate limit for `/api/ai` | Back off and retry. |
+| 502 | plain text | `ai-service` unreachable, or the gateway's circuit breaker is open | Retry later. |
+| 504 | plain text | Upstream timeout | Retry later. |
+
+## Gateway and BFF
+
+Reviewed against the gateway code on `develop` on 2026-09-27. ⚠️ marks a gateway change that must
+land before M1.8.
+
+**Gateway**
+
+- ⚠️ **Route** `/api/ai` → `ai-service`, prefix stripped, `auth_mode: required`: every request
+  reaches `ai-service` with `X-User-Id`; a request without a valid token gets `401` at the gateway.
+- **No buffering** of `text/event-stream` (Go's reverse proxy flushes each write).
+- ⚠️ **Timeouts.** No write deadline and no per-request timeout on the events endpoint; the other
+  `/api/ai` endpoints keep a short timeout. There is no idle timeout on upstream bodies and no
+  maximum connection lifetime. A graceful restart closes open streams after 5 s.
+- **Authentication** is `Authorization: Bearer` only (no cookies), checked when a request or
+  stream starts; `Authorization` is removed before forwarding.
+- **Forwarded headers:** `X-User-Id` (from the JWT `sub`; client values stripped), `X-User-Email`,
+  `X-User-Roles` (comma-separated), `Idempotency-Key`, `Last-Event-ID`, `X-Request-Id`,
+  `traceparent`.
+- **Retries:** `GET`/`HEAD`/`OPTIONS` only, on network errors and 500/502/503/504, up to 3
+  attempts. `POST` is never retried by the gateway.
+- **Circuit breaker:** opens on connection errors only, never on HTTP statuses; while open, every
+  `/api/ai` request gets `502`.
+- ⚠️ **Rate limit:** one token bucket per route and per user; for `/api/ai`, **120 requests/min
+  with a burst of 30**, tuned later.
+- ⚠️ **CORS** also allows `Idempotency-Key` and `Last-Event-ID` (needed only if a browser calls
+  the gateway directly instead of through the BFF).
+
+**BFF (frontend team)**
+
+- Holds the tokens and adds `Authorization: Bearer` to every call.
+- Uses a fetch-based SSE client for the events endpoint, streams the response to the browser
+  **without buffering**, and forwards `Last-Event-ID` and `Idempotency-Key`.
+- Retries `POST /v1/runs` only with the same `Idempotency-Key`. Cancel and preview reports are safe
+  to resend as they are.
+
+**`ai-service`**
+
+- Sends `Cache-Control: no-cache` and `X-Accel-Buffering: no` on the stream, in case a proxy is
+  added in front later.
+- Joins the gateway's trace through `X-Request-Id` and `traceparent` (M1.7).
+- Passes the received `X-User-Id` on to `project-service` (ADR-0003 Decision 13).
+- **Is not reachable from outside the internal network**, and neither is `project-service`.
+  Trusting `X-User-Id` "only from the gateway" is a convention; the network does not enforce it
+  today.
 
 ## Versioning
 
