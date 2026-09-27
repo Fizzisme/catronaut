@@ -1,8 +1,9 @@
 # ADR-0003 — Service contracts: the run API and project files
 
-- **Status:** Proposed 2026-09-27. Part (a) was reviewed by the gateway team on 2026-09-27; the
-  gateway changes it needs before M1.8 are listed in the contract. Part (b) waits for the
-  `project-service` team to accept or amend the files module.
+- **Status:** Accepted 2026-09-27. Part (a) was reviewed by the gateway team on 2026-09-27; the
+  gateway changes it needs before M1.8 are listed in the contract. Part (b) was agreed by the
+  `project-service` team on 2026-09-27, with the answers recorded in the
+  [requirements](../project-service-contract.md#answers-from-the-project-service-team-2026-09-27).
 - **Milestone:** M0.4 (ROADMAP §7, Phase 0)
 - **Hands over to:** the frontend and gateway teams ([run API contract](../run-api-contract.md));
   the `project-service` team ([project files requirements](../project-service-contract.md)).
@@ -89,7 +90,9 @@ so they have to be settled first. The inputs:
 7. **Request a `files` module from `project-service`** as specified in the
    [requirements](../project-service-contract.md): a files revision separate from `row_version`,
    immutable revisions, atomic batch changes with `If-Match`, revert as a new revision, and a
-   lease with TTL and renewal. The revision a run started from is its restore point.
+   lease with TTL and renewal. The revision a run started from is its restore point:
+   `project-service` records it when the lease is first acquired, returns it as `baseRevision`,
+   and never prunes it, nor the run's end point.
 8. **Lease plus optimistic concurrency.** `ai-service` holds a lease for the length of a run and
    sends `If-Match` on every flush. A `412` during a run ends it as `failed`; the agent never
    overwrites someone else's change.
@@ -124,14 +127,14 @@ Decisions 10–14 settle the questions left open by the first draft (owner, 2026
     review, 2026-09-27): **`ai-service` and `project-service` must not be reachable from outside
     the internal network**, a deployment requirement checked in M6.4.
 14. **Publishing is outside the agent.** The agent writes files only; it never publishes or
-    changes a Project's lifecycle or visibility, and those actions are not in its tool set. We
-    recommend that `project-service` pin a `publishedRevision` at publish time once published
-    Projects expose their files (requirements, open question 3).
+    changes a Project's lifecycle or visibility, and those actions are not in its tool set.
+    `project-service` pins a `publishedRevision` at publish time; it is required before published
+    Projects expose files or a live demo publicly (agreed 2026-09-27, requirements answer 3).
 
 ## Open questions
 
-1. For the `project-service` team: the files module itself, its storage and retention, and the
-   `publishedRevision` recommendation ([requirements](../project-service-contract.md#open-questions-for-the-project-service-team)).
+None. The `project-service` team settled storage, retention and `publishedRevision` on
+2026-09-27 ([answers](../project-service-contract.md#answers-from-the-project-service-team-2026-09-27)).
 
 ## Consequences
 

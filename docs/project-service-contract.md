@@ -1,10 +1,11 @@
 # `project-service` contract: project files (requirements)
 
-- **Version:** v1 draft · 2026-09-27 · from M0.4 (ADR-0003)
+- **Version:** v1 · 2026-09-27 · from M0.4 (ADR-0003); agreed with the `project-service` team
+  2026-09-27
 - **Audience:** the `project-service` team. `ai-service` implements its side in M1.4
   (`ProjectServiceWorkspace`); the frontend reads files through the same endpoints.
-- **Status:** a **request**. The Phase 1 Catalog Management API manages project metadata only;
-  none of the endpoints below exist yet. The design follows that API's conventions so it can live
+- **Status:** **agreed**, not implemented yet. The Phase 1 Catalog Management API manages project
+  metadata only; none of the endpoints below exist yet. The design follows that API's conventions so it can live
   in the same service as a `files` module.
 
 ## Why
@@ -178,9 +179,15 @@ Success: `201 Created`, `ApiResponse<Lease>`:
   "leaseId": "5d0c…",
   "holder": "ai-service",
   "runId": "run_abc",
+  "baseRevision": 12,
   "expiresAt": "2026-09-27T10:17:40Z"
 }
 ```
+
+`baseRevision` is the run's restore point: the `filesRevision` when the lease was **first**
+acquired for this `runId`; acquiring again for the same run does not move it. When the lease is
+released or expires, the current `filesRevision` becomes the run's end point. Both are kept until
+the Project is deleted ([follow-up answer 1](#follow-up-answers-2026-09-27)).
 
 Errors: `401`, `403`, `404`, `409 PROJECT_INVALID_STATE`, `423 PROJECT_LEASED` (the body carries
 the current lease without its `leaseId`).
@@ -251,7 +258,7 @@ needs no new mechanism.
 ## How `ai-service` uses the API
 
 ```
-run start    POST lease                                    → leaseId
+run start    POST lease                                    → leaseId, baseRevision R0
              GET files?include=content                     → working copy at revision R0
 during run   POST files/changes  If-Match: Rn, Lease-Id    → Rn+1   (at each safe point with writes)
              PUT lease/{id}      every ttl/3
@@ -260,7 +267,8 @@ run end      POST files/changes  (final flush, label "run:<id> end")
 undo a run   POST files/revert   toRevision: R0
 ```
 
-- R0, the revision the run started from, is its restore point; nothing extra is stored.
+- R0, the revision the run started from, is its restore point. `project-service` records it with
+  the lease and never prunes it.
 - A `412` during a run means the lease was lost and someone else wrote. `ai-service` does not
   overwrite: the run ends as `failed` with that reason, and the user sees the other change.
 - If `ai-service` crashes, changes since the last safe point are lost and the lease expires
@@ -278,3 +286,66 @@ undo a run   POST files/revert   toRevision: R0
    `publishedRevision` at publish time**: later agent or user edits then do not change what the
    public sees until the owner publishes again, and a rollback only moves the pointer. This
    belongs with the deferred `project_versions` (Release) work.
+
+## Answers from the `project-service` team (2026-09-27)
+
+1. **Storage.** Split by layer instead of choosing one:
+   - **Metadata in Postgres** — not just the `filesRevision` counter, but the whole manifest per
+     revision (`path → sha256 → size`). This is the part that must be transactional with the
+     revision bump and the `If-Match` check ("all or nothing," [§2](#2-apply-changes)); object
+     storage has no cross-key transactions, so the manifest can't live there.
+   - **File content in object storage**, keyed by `sha256` (content-addressed, matching "revisions
+     are immutable"). Reuses the object storage the Catalog blueprint already plans for source
+     snapshots, and files with the same content — across files or across revisions — share one
+     blob automatically, which keeps size down against the 512 KB/file, 10 MB/revision limits.
+   - This split is invisible to `ai-service`/the frontend: the files API contract above doesn't
+     change either way, so the object-storage backend (S3, MinIO, …) can be swapped later without
+     touching this contract.
+
+2. **Retention.** Agreed with pruning intermediate agent revisions after N days and keeping
+   labelled run-start/run-end points, with one added rule: **never prune a revision still
+   referenced** — by the current `publishedRevision` (answer 3), or by a `revision`/`base_revision`
+   value stored in session history. Sessions are durable and kept indefinitely
+   ([run API contract](run-api-contract.md), ADR-0003 Decision 11), so a user can reopen an old
+   session and revert to its `base_revision` long after N days have passed; pure time-based
+   pruning would silently break that revert.
+
+3. **Publishing.** Agreed — pin `publishedRevision` at publish time, and treat it as a requirement
+   rather than a nice-to-have, not gated on the full `project_versions`/Release work. Without the
+   pin, a run in progress on an already-published Project would change what the public sees
+   between safe points, which is exactly what ADR-0003 Decision 14 ("the agent never publishes or
+   changes lifecycle/visibility") is meant to prevent — a moving `publishedRevision` is an indirect
+   way of doing that.
+
+## Follow-up answers (2026-09-27)
+
+1. **Retention vs. run start — OK, with three additions.** `project-service` records the run's
+   restore point when `POST /{projectId}/lease` succeeds, and exempts it from pruning. This replaces
+   the label-based rule, so nothing depends on how a revision is labelled.
+   - **Return it in the lease response** as `baseRevision`: `ai-service` then takes R0 from the
+     lease and does not rely on a separate `GET files` returning the same number. While the lease is
+     active nobody else can write, so both reads agree, but one source is simpler. Adding a field to
+     `Lease` is not breaking.
+   - **First acquire per `runId` wins.** If `ai-service` acquires a lease again for the same run,
+     the recorded start point does not move.
+   - **Record the end point the same way:** when the lease is released or expires, the current
+     `filesRevision` becomes that run's end point and is exempt from pruning too. This covers a run
+     that failed or crashed before its final flush. Its last revision is labelled `run:<id> step N`,
+     not `run:<id> end`, yet `run_finished.revision` still points at it.
+   - These are rows of (`projectId`, `runId`, `startRevision`, `endRevision`). They are deleted only
+     with the Project. Blobs are shared by `sha256`, so keeping these revisions costs little.
+
+2. **Storage — confirmed.** Blobs are uploaded before the manifest transaction commits, and a GC
+   job removes orphaned blobs. How it works:
+   - The server computes `sha256` itself and never trusts one sent by a client. An upload whose
+     key already exists is skipped, so retries are idempotent.
+   - GC is mark-and-sweep with a **grace period** (starting value 24 h). It deletes a blob only
+     when no manifest references it **and** the blob is older than the grace period. Without the
+     grace period, GC could delete a blob that a transaction still in flight has uploaded but not
+     yet committed, or a blob that a new revision is about to reuse.
+
+3. **`publishedRevision` — correct.** It must exist before a published Project exposes files or a
+   live demo publicly. Phase 1 Catalog stays metadata-only. One addition for when it lands: existing
+   `PUBLISHED` Projects start with `publishedRevision = null`, which means no files are shown
+   publicly until the owner publishes again. The migration does not backfill it with the current
+   `filesRevision`, because that would publish content without any action by the owner.
