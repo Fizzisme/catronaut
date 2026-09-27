@@ -1,0 +1,438 @@
+# Run API contract (frontend ↔ `ai-service`)
+
+- **Version:** v1 draft · 2026-09-27 · from M0.4 (ADR-0003); reviewed by the gateway team
+  2026-09-27 (see [Gateway and BFF](#gateway-and-bff))
+- **Audience:** the frontend team and the API gateway team; `ai-service` implements it in M1.8.
+
+The frontend talks to `ai-service` through the API gateway. A **run** is one agent turn: it starts
+from a user message (or the answers to a question form), streams events while the agent works,
+and always ends with exactly one terminal event. A full-site run takes minutes, so runs are
+asynchronous: starting one returns at once and progress arrives over Server-Sent Events (SSE).
+
+## Concepts
+
+| Term | Meaning |
+|---|---|
+| Project | A file tree in `project-service`, identified by `project_id`. |
+| Session | The conversation between one user and the agent about one project. It holds the history that later runs build on. `session_id` is opaque and issued by `ai-service`. |
+| Run | One agent turn inside a session. At most **one active run per project**. |
+| Event | One item of a run's stream, numbered by `seq` (1, 2, 3, … per run). |
+| Revision | The version of the project's files the preview rendered (see [Preview reports](#preview-reports)). |
+
+## Run lifecycle
+
+```
+POST /v1/runs ──► queued? ──► running ──► run_finished { status }
+                                 │            done · needs_input · stopped_at_limit · failed · cancelled
+                                 └── POST /v1/runs/{id}/cancel ──► (next safe point) ──► cancelled
+```
+
+- **Admission control.** Only a fixed number of runs are active at once (the GPU budget,
+  ADR-0003 Decision 12). A new run waits in `queued` until a slot frees, and its stream reports
+  its position. When the queue is full the start is refused at once with `429 queue_full`.
+  A user has at most one active or queued run.
+
+- **`needs_input` ends the run.** The agent asked structured questions; the frontend renders a form
+  and sends **all answers together** as the input of a new run in the same session. Nothing is
+  held open while the user thinks.
+- A plain message sent while questions are pending is also accepted; the agent sees that the
+  questions went unanswered.
+- **Cancellation** takes effect at the next safe point (after a model response or a tool result).
+  A tool that was interrupted is reported as `cancelled`, never as success.
+- Files the agent wrote before a cancellation or failure are kept and can be reverted to the
+  revision the run started from (`run_started.base_revision`; see the
+  [`project-service` contract](project-service-contract.md#4-revert)).
+
+## Endpoints
+
+Paths in this document are `ai-service` paths. Publicly they sit under the gateway prefix
+`/api/ai`, which the gateway strips: `/api/ai/v1/runs` reaches `ai-service` as `/v1/runs`. URLs
+the API returns, such as `events_url`, are `ai-service` paths as well; the frontend puts its own
+base in front. In the browser every call goes through the Next.js BFF, which adds
+`Authorization: Bearer`; the gateway verifies the token and forwards the user's identity (see
+[Gateway and BFF](#gateway-and-bff)). Request and response bodies are JSON (UTF-8) unless stated
+otherwise.
+
+| Method and path | Purpose |
+|---|---|
+| `POST /v1/runs` | Start a run. |
+| `GET /v1/runs/{run_id}/events` | SSE stream of the run's events, with replay. |
+| `GET /v1/runs/{run_id}` | Snapshot of the run (status, last `seq`, pending questions). |
+| `POST /v1/runs/{run_id}/cancel` | Ask the run to stop. |
+| `GET /v1/sessions/{session_id}/messages` | The session's conversation, to redraw the chat after a reload. |
+| `POST /v1/projects/{project_id}/preview-reports` | Report what the preview rendered. |
+
+### `POST /v1/runs`
+
+Headers: `Idempotency-Key: <uuid>` (required) — retrying with the same key returns the same run
+instead of starting a second one.
+
+```json
+{
+  "project_id": "prj_123",
+  "session_id": "ses_456",
+  "input": { "kind": "message", "text": "Build a landing page for a coffee roastery" }
+}
+```
+
+`session_id` is omitted or `null` to open a new session. The answers to a question form use
+`kind: "answers"`:
+
+```json
+{
+  "project_id": "prj_123",
+  "session_id": "ses_456",
+  "input": {
+    "kind": "answers",
+    "question_set_id": "qs_789",
+    "answers": [
+      { "question_id": "site_type", "value": "landing" },
+      { "question_id": "sections", "value": ["hero", "menu", "contact"] },
+      { "question_id": "tone", "value": "Warm, handmade, a bit playful" }
+    ]
+  }
+}
+```
+
+`value` is a string for `single` and `text` questions and an array of option ids for `multi`.
+
+**`202 Accepted`**
+
+```json
+{
+  "run_id": "run_abc",
+  "session_id": "ses_456",
+  "status": "queued",
+  "events_url": "/v1/runs/run_abc/events"
+}
+```
+
+`status` is `running` when a slot was free, otherwise `queued`.
+
+### `GET /v1/runs/{run_id}/events`
+
+Response headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache`,
+`X-Accel-Buffering: no`. Each event is sent as:
+
+```
+id: 42
+event: file_changed
+data: {"seq":42,"run_id":"run_abc","type":"file_changed","ts":"2026-09-26T10:15:03.120Z","data":{…}}
+
+```
+
+- **Replay.** The stream starts after the `Last-Event-ID` header, or after `?after=<seq>`, or from
+  the beginning when neither is given. A reconnecting client therefore never loses or duplicates
+  an event.
+- **The client sends the resume point itself.** The frontend uses a fetch-based SSE client
+  through the BFF, which, unlike `EventSource`, does not send `Last-Event-ID` on its own. On every
+  reconnect it sends `Last-Event-ID` (or `?after=<seq>`) with the last `seq` it applied.
+- **Streams also end early**: a gateway restart (open streams close after 5 s of graceful
+  shutdown), a network loss, or a BFF restart. Reconnect with the resume point. The access token
+  is checked only when a stream connects, so a long stream survives token expiry; a reconnect
+  that gets `401` refreshes the token and reconnects.
+- **Heartbeat.** A comment line `: ping` every **15 s**. A single model call can stay silent for
+  more than 13 s at long context (ADR-0001), so without it idle-timeouts would cut the stream.
+- The server **closes the stream after `run_finished`**. Closing or losing the stream does **not**
+  cancel the run.
+- Events stay available for replay for **1 hour** after the run ends. After that the endpoint
+  returns `410 events_expired`; use `GET /v1/runs/{run_id}` and reload files from
+  `project-service`.
+
+### `GET /v1/runs/{run_id}`
+
+```json
+{
+  "run_id": "run_abc",
+  "session_id": "ses_456",
+  "project_id": "prj_123",
+  "status": "needs_input",
+  "last_seq": 318,
+  "questions": { "question_set_id": "qs_789", "items": [ … ] },
+  "started_at": "2026-09-26T10:14:51.004Z",
+  "finished_at": "2026-09-26T10:15:40.771Z"
+}
+```
+
+`status` is `queued`, `running` or one of the terminal statuses; `questions` is present only for
+`needs_input`.
+
+### `POST /v1/runs/{run_id}/cancel`
+
+Empty body. **`202 Accepted`**; the stream later delivers `run_finished` with `status:
+"cancelled"`. A queued run is cancelled at once. Cancelling a finished run is a no-op that returns
+`202` as well.
+
+### `GET /v1/sessions/{session_id}/messages`
+
+Query: `before=<message_id>` and `limit` (1–100, default 50), newest first.
+
+```json
+{
+  "items": [
+    {
+      "id": "msg_2",
+      "run_id": "run_abc",
+      "role": "assistant",
+      "text": "Before I start: a few questions about the site.",
+      "questions": { "question_set_id": "qs_789", "items": [ … ] },
+      "created_at": "2026-09-26T10:15:40.771Z"
+    },
+    {
+      "id": "msg_1",
+      "run_id": "run_abc",
+      "role": "user",
+      "input": { "kind": "message", "text": "Build a landing page for a coffee roastery" },
+      "created_at": "2026-09-26T10:14:51.004Z"
+    }
+  ],
+  "has_more": false
+}
+```
+
+A user message carries the run's `input` (a message or the answers to a question form); an
+assistant message carries the text the user saw and, for `needs_input`, the questions. Steps and
+tool calls are not part of the history; they live in the run's event stream while it is kept.
+Sessions are stored durably (ADR-0003 Decision 11), so the history survives a restart of
+`ai-service`.
+
+## Events
+
+The stream shows the agent working step by step, the way a coding-agent CLI does: which step it
+is on, that it is thinking and for how many tokens, which tool it is calling and on what, what
+the tool returned, and its plan. The frontend renders these facts; `ai-service` sends structured
+data rather than display strings, so the wording and language stay in the frontend.
+
+Every event has the envelope `{ seq, run_id, type, ts, data }`. A **step** is one model call plus
+the tool calls it made, numbered from 1. A typical step streams:
+
+```
+step_started
+  thinking_started · thinking_delta … · usage … · thinking_finished
+  message_delta …
+  tool_call_started · tool_call · file_changed? · tool_result      (per tool call)
+  todo_updated?
+step_finished
+```
+
+### Run
+
+| `type` | `data` | Notes |
+|---|---|---|
+| `run_queued` | `{ position }` | Only for a queued run, before `run_started`; sent again when the position changes. `position` 1 is next. |
+| `run_started` | `{ session_id, project_id, base_revision }` | The first event of a run that was not queued. `base_revision` is the `project-service` revision the run started from. |
+| `run_finished` | `{ status, reason?, questions?, revision?, usage }` | Always the last event. See [below](#run_finished). |
+
+### Steps and model output
+
+| `type` | `data` | Frontend shows, e.g. |
+|---|---|---|
+| `step_started` | `{ step, max_steps }` | "Step 3 of 40" |
+| `thinking_started` | `{ step }` | "Thinking…" |
+| `thinking_delta` | `{ step, text }` | The reasoning text, collapsible. Not sent when thinking display is off (below). |
+| `thinking_finished` | `{ step, duration_ms, tokens }` | "Thought for 12 s · 850 tokens" |
+| `message_delta` | `{ step, text }` | Assistant text for the user. |
+| `usage` | `{ step, input_tokens, output_tokens, cached_tokens?, run_input_tokens, run_output_tokens }` | A live token counter. `input_tokens` is the current model call's prompt; `output_tokens` is what it has generated so far; `run_*` are totals for the run. `cached_tokens` appears when the model server reports prefix-cache hits. |
+| `model_retry` | `{ step, attempt, max_attempts, delay_ms, reason }` | "Model connection lost, retrying (1/2)…" |
+| `step_finished` | `{ step, duration_ms, finish_reason }` | Collapses the step. `finish_reason` ∈ `tool_calls`, `stop`, `length`. |
+
+Token counts come from the model server's per-chunk usage (vLLM `stream_options:
+{ include_usage, continuous_usage_stats }`). `thinking_finished.tokens` is the number of output
+tokens generated before the first answer or tool-call token of that step.
+
+### Tools
+
+| `type` | `data` | Frontend shows, e.g. |
+|---|---|---|
+| `tool_call_started` | `{ step, call_id, name }` | "Writing…" as soon as the model has chosen the tool, while its arguments are still being generated. |
+| `tool_call` | `{ step, call_id, name, input }` | "Reading `app/page.tsx` (lines 1–120)". `input` is the display subset below. |
+| `tool_result` | `{ step, call_id, status, duration_ms, stats?, error? }` | "Read 120 lines · 45 ms". `status` ∈ `ok`, `error`, `cancelled`; `error` = `{ code, message }`. |
+| `todo_updated` | `{ items: [{ content, status }] }` | The plan as a checklist; `status` ∈ `pending`, `in_progress`, `completed`. The full list is sent every time. |
+
+`tool_call_started` is sent early only if the model server streams the tool name before the
+arguments (verified in M1.1); otherwise it is sent together with `tool_call`.
+
+`input` and `stats` per tool. Large arguments (file contents, `old_string`/`new_string`) are
+never sent here; the result of a write arrives as `file_changed`.
+
+| Tool | `input` | `stats` |
+|---|---|---|
+| `Read` | `{ path, offset?, limit? }` | `{ lines, truncated }` |
+| `Write` | `{ path, bytes }` | `{ bytes }` |
+| `Edit` | `{ path, replace_all }` | `{ replacements }` |
+| `Glob` | `{ pattern, path? }` | `{ matches }` |
+| `Grep` | `{ pattern, path?, glob? }` | `{ matches, files }` |
+| `TodoWrite` | `{ items }` (count) | – (the list arrives as `todo_updated`) |
+| `ask_user` | `{ questions }` (count) | – (the questions arrive in `run_finished`) |
+
+Tools added later (skills, `check_preview`, MCP) define their `input` and `stats` when they
+land. A tool the frontend does not know is shown by `name` only.
+
+### Files
+
+| `type` | `data` | Notes |
+|---|---|---|
+| `file_changed` | `{ path, op, content?, sha256? }` | `op` ∈ `create`, `update`, `delete`. `content` (full UTF-8 text) and `sha256` are present unless `op` is `delete`. Sent as soon as the agent writes, so the preview updates live. |
+| `files_persisted` | `{ revision, paths }` | The listed changes are stored in `project-service` as `revision`. Sent at safe points and before `run_finished`. |
+
+### `run_finished`
+
+| Field | Meaning |
+|---|---|
+| `status` | `done`, `needs_input`, `stopped_at_limit`, `failed` or `cancelled`. |
+| `reason` | Human-readable detail for `stopped_at_limit`, `failed` and `cancelled`. |
+| `questions` | For `needs_input`: `{ question_set_id, items: [{ id, text, kind, options?, required }] }` with `kind` ∈ `single`, `multi`, `text` and `options` = `[{ id, label }]`. |
+| `revision` | The last `project-service` revision the run wrote, if it wrote any. |
+| `usage` | `{ steps, input_tokens, output_tokens, thinking_tokens, duration_ms }`. |
+
+### Stream volume
+
+- `thinking_delta` and `message_delta` are coalesced: at most one event per stream every
+  **100 ms**.
+- `usage` is sent at most **twice per second** while the model generates, and once at the end of
+  every model call.
+- **Thinking display** is a server setting: **off in production**, on for development and for
+  users whose `X-User-Roles` (forwarded by the gateway) contains the role configured for it
+  (ADR-0003 Decision 10). When it is off, `thinking_delta` is not sent;
+  `thinking_started`, `thinking_finished` and `usage` still are, so the live token count and
+  "Thought for 12 s · 850 tokens" still show. The full reasoning is always kept in the run's trace.
+
+### Rules for the client
+
+1. **Ignore unknown event types and unknown fields.** New ones are added without a version bump.
+2. Group events by `step`, and tool events by `call_id`.
+3. Apply `file_changed` events in `seq` order to the preview's file set.
+4. **After `run_finished`, reload the file tree from `project-service`.** It is the source of
+   truth; this also repairs the preview if `ai-service` failed between a `file_changed` and the
+   next `files_persisted`.
+5. During a run the project is leased to `ai-service`: the editor is read-only, and user writes to
+   `project-service` are rejected. The user can cancel the run to edit.
+
+## Preview reports
+
+The frontend reports what the preview rendered **every time a render settles** — during a run and
+also after the user's own edits. `ai-service` uses the reports for the self-fix loop (M2.7): an
+active run receives them at its next safe point; otherwise the latest report is attached to the
+next run in that project.
+
+### `POST /v1/projects/{project_id}/preview-reports`
+
+```json
+{
+  "basis": { "kind": "run", "run_id": "run_abc", "seq": 57 },
+  "settled": true,
+  "route": "/menu",
+  "bundler_errors": [
+    {
+      "title": "ModuleNotFoundError",
+      "message": "Cannot find module '@/components/Menu' relative to '/app/menu/page.tsx'",
+      "path": "/app/menu/page.tsx",
+      "line": 3,
+      "column": 1
+    }
+  ],
+  "runtime_errors": [
+    {
+      "kind": "react.render",
+      "message": "boom during render",
+      "stack": "…",
+      "component_stack": "…"
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `basis` | Which files were rendered: `{ kind: "run", run_id, seq }` = the project as of that run's event `seq` (the last `file_changed` applied), or `{ kind: "revision", revision }` = a stored `project-service` revision. |
+| `settled` | `true` once the bundler is idle and the lazy-chunk window has passed (at least ~10 s when `next/dynamic` is used — ADR-0002 Decision 3). An unsettled report may be sent earlier and followed by a settled one. |
+| `route` | The URL path shown in the preview. |
+| `bundler_errors` | Sandpack `show-error` messages, shape as in the [preview contract](preview-contract.md#error-reports-the-preview-produces). |
+| `runtime_errors` | Bridge reports; `kind` ∈ `window.error`, `unhandledrejection`, `react.render`, `react.uncaught`. `[preview contract]` shim errors arrive here. |
+
+An empty pair of error lists means the render succeeded. **`202 Accepted`**. Limits: body ≤ 64 KB;
+the frontend truncates stacks to their first 40 lines and sends at most 20 errors per list.
+Screenshots are not part of v1; they are added for M5.4 as a separate upload.
+
+- **Frequency.** At most one report every **2 s** per project; when renders settle faster, only
+  the latest is sent. All `/api/ai` calls share one per-user rate limit at the gateway.
+- **Retries are safe.** A report with the same `basis` and `settled` as an earlier one replaces
+  it, so the frontend can resend after a network error without an idempotency key.
+
+## Errors
+
+Errors from `ai-service` have the body `{ "error": { "code": "...", "message": "..." } }`.
+`ai-service` returns 5xx only for transient failures, because the gateway retries `GET` requests
+on 500, 502, 503 and 504.
+
+| HTTP | `code` | When |
+|---|---|---|
+| 400 | `invalid_request` | Malformed body; answers that do not match the pending `question_set_id`. |
+| 403 | `forbidden` | The user may not access this project, session or run. |
+| 404 | `not_found` | Unknown project, session or run. |
+| 409 | `run_active` | The project, or the user, already has an active or queued run; the body includes its `run_id`. |
+| 410 | `events_expired` | Replay requested after the retention window. |
+| 423 | `project_locked` | The project is leased by another holder in `project-service`. |
+| 429 | `queue_full` | Every run slot is busy and the queue is full; retry later. |
+
+### Errors from the gateway
+
+The gateway answers some requests itself, in its own shapes. The frontend tells them apart from
+`ai-service` errors by the body: only `ai-service` errors have `error.code`.
+
+| HTTP | Body | When | Client action |
+|---|---|---|---|
+| 401 | `{"message": …}` or `{"error": …}` | Missing or expired access token | Refresh the token and retry. |
+| 429 | `{"error": "rate limit exceeded"}` | The per-user rate limit for `/api/ai` | Back off and retry. |
+| 502 | plain text | `ai-service` unreachable, or the gateway's circuit breaker is open | Retry later. |
+| 504 | plain text | Upstream timeout | Retry later. |
+
+## Gateway and BFF
+
+Reviewed against the gateway code on `develop` on 2026-09-27. ⚠️ marks a gateway change that must
+land before M1.8.
+
+**Gateway**
+
+- ⚠️ **Route** `/api/ai` → `ai-service`, prefix stripped, `auth_mode: required`: every request
+  reaches `ai-service` with `X-User-Id`; a request without a valid token gets `401` at the gateway.
+- **No buffering** of `text/event-stream` (Go's reverse proxy flushes each write).
+- ⚠️ **Timeouts.** No write deadline and no per-request timeout on the events endpoint; the other
+  `/api/ai` endpoints keep a short timeout. There is no idle timeout on upstream bodies and no
+  maximum connection lifetime. A graceful restart closes open streams after 5 s.
+- **Authentication** is `Authorization: Bearer` only (no cookies), checked when a request or
+  stream starts; `Authorization` is removed before forwarding.
+- **Forwarded headers:** `X-User-Id` (from the JWT `sub`; client values stripped), `X-User-Email`,
+  `X-User-Roles` (comma-separated), `Idempotency-Key`, `Last-Event-ID`, `X-Request-Id`,
+  `traceparent`.
+- **Retries:** `GET`/`HEAD`/`OPTIONS` only, on network errors and 500/502/503/504, up to 3
+  attempts. `POST` is never retried by the gateway.
+- **Circuit breaker:** opens on connection errors only, never on HTTP statuses; while open, every
+  `/api/ai` request gets `502`.
+- ⚠️ **Rate limit:** one token bucket per route and per user; for `/api/ai`, **120 requests/min
+  with a burst of 30**, tuned later.
+- ⚠️ **CORS** also allows `Idempotency-Key` and `Last-Event-ID` (needed only if a browser calls
+  the gateway directly instead of through the BFF).
+
+**BFF (frontend team)**
+
+- Holds the tokens and adds `Authorization: Bearer` to every call.
+- Uses a fetch-based SSE client for the events endpoint, streams the response to the browser
+  **without buffering**, and forwards `Last-Event-ID` and `Idempotency-Key`.
+- Retries `POST /v1/runs` only with the same `Idempotency-Key`. Cancel and preview reports are safe
+  to resend as they are.
+
+**`ai-service`**
+
+- Sends `Cache-Control: no-cache` and `X-Accel-Buffering: no` on the stream, in case a proxy is
+  added in front later.
+- Joins the gateway's trace through `X-Request-Id` and `traceparent` (M1.7).
+- Passes the received `X-User-Id` on to `project-service` (ADR-0003 Decision 13).
+- **Is not reachable from outside the internal network**, and neither is `project-service`.
+  Trusting `X-User-Id` "only from the gateway" is a convention; the network does not enforce it
+  today.
+
+## Versioning
+
+The prefix `/v1` changes only for breaking changes. Adding endpoints, event types, optional
+fields or error codes is not breaking (client rule 1).
