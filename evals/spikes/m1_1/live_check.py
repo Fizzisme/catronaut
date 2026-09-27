@@ -5,7 +5,8 @@ The unit tests replay hand-written SSE; this confirms the real server streams wh
   2. tool_call    qwen3_coder tool-call fragments assemble into one valid call
   3. round_trip   history with reasoning + tool call + tool result is accepted, and the reasoning
                   really reaches the prompt (more prompt tokens than the same history without it)
-  4. truncation   finish_reason=length leaves no tool call in `message.tool_calls`
+  4. truncation   output cut by max_tokens leaves no tool call in `message.tool_calls`
+                  (vLLM 0.30 reports finish_reason "tool_calls" here, not "length")
 
 Start vLLM with the ADR-0001 flags first (port 8010 on vast.ai), then run from the repo root:
   vllm serve Qwen/Qwen3.8-27B-FP8 --served-model-name Qwen/Qwen3.8-27B --port 8010 \
@@ -143,12 +144,14 @@ async def check_truncation(short: LLMClient) -> Result:
     done, _ = await _complete(
         short, [UserMessage(content=WRITE_PROMPT)], tools=[WRITE], enable_thinking=False
     )
+    tokens = done.usage.completion_tokens
     if done.finish_reason != "length":
-        return Result("truncation", False, f"finish={done.finish_reason}: output fit the limit")
+        detail = f"finish={done.finish_reason} completion_tokens={tokens}"
+        return Result("truncation", False, detail)
     ok = done.message.tool_calls == ()
     partial = done.truncated_tool_calls
     how = "partial call captured" if partial else "server emitted no partial call"
-    detail = f"{how}; truncated_tool_calls={[c.model_dump() for c in partial]}"
+    detail = f"completion_tokens={tokens}; {how}; truncated_tool_calls={[c.model_dump() for c in partial]}"
     return Result("truncation", ok, detail)
 
 

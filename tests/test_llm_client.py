@@ -79,15 +79,18 @@ class Server:
 
 
 def run(
-    server: Server, max_attempts: int = 4, **kwargs: Any
+    server: Server, max_attempts: int = 4, max_tokens: int = 32_768, **kwargs: Any
 ) -> tuple[list[StreamEvent], list[float]]:
     sleeps: list[float] = []
 
     async def fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
+    config = LLMConfig(
+        base_url="http://vllm/v1", model="m", max_attempts=max_attempts, max_tokens=max_tokens
+    )
     client = LLMClient(
-        LLMConfig(base_url="http://vllm/v1", model="m", max_attempts=max_attempts),
+        config,
         http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(server)),
         sleep=fake_sleep,
         rand=lambda: 0.5,
@@ -197,6 +200,22 @@ def test_truncated_tool_call_is_never_offered_for_execution() -> None:
     assert done.truncated_tool_calls == (
         ToolCall(id="call_a", name="Write", arguments='{"path": "a'),
     )
+
+
+def test_output_that_used_the_whole_budget_is_truncated_even_if_vllm_says_tool_calls() -> None:
+    # vLLM 0.30 replaces finish_reason "length" with "tool_calls" (M1.1 live check, max_tokens=20)
+    fragment = call_fragment(0, '{"path": "app/page.tsx\\n</', id="call_a", name="write_file")
+    server = Server(
+        sse(
+            chunk({"tool_calls": [fragment]}),
+            chunk({}, finish="tool_calls"),
+            chunk(usage={"prompt_tokens": 30, "completion_tokens": 20, "total_tokens": 50}),
+        )
+    )
+    done = completion_of(run(server, max_tokens=20)[0])
+    assert done.finish_reason == "length"
+    assert done.message.tool_calls == ()
+    assert [call.id for call in done.truncated_tool_calls] == ["call_a"]
 
 
 def test_request_body_follows_adr_0001() -> None:

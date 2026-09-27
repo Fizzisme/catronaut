@@ -177,8 +177,15 @@ class _Accumulator:
                 self.finish_reason = choice.finish_reason
         return events
 
-    def completion(self, finish_reason: str, attempts: int, duration_ms: int) -> Completion:
+    def completion(
+        self, finish_reason: str, max_tokens: int, attempts: int, duration_ms: int
+    ) -> Completion:
         finish = _finish_reason(finish_reason)
+        # vLLM 0.30 reports "tool_calls" even when the output hit max_tokens (M1.1 live check),
+        # so a response that used the whole budget is truncated whatever the server says.
+        # vLLM rejects max_tokens beyond the context instead of lowering it, so this is complete.
+        if self.usage.completion_tokens >= max_tokens:
+            finish = "length"
         calls = tuple(
             ToolCall(id=call.id, name=call.name, arguments="".join(call.arguments))
             for _, call in sorted(self.calls.items())
@@ -283,7 +290,9 @@ class LLMClient:
             if state.finish_reason is None:
                 raise LLMStreamInterrupted("stream ended without a finish_reason")
             duration_ms = round((time.monotonic() - started) * 1000)
-            yield state.completion(state.finish_reason, attempt, duration_ms)
+            yield state.completion(
+                state.finish_reason, self._config.max_tokens, attempt, duration_ms
+            )
             return
 
     def _backoff(self, attempt: int) -> float:
