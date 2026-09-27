@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "typecheck", "rules": [], "note": "Next.js 15+ params is a promise; slug is undefined, every post 404s"}}

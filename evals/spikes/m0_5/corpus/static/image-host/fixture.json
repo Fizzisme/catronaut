@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "static", "rules": ["image.src"], "note": "host missing from next.config images.remotePatterns"}}

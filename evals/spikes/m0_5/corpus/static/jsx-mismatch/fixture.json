@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "static", "rules": ["parse.jsx-mismatch"], "note": "tree-sitter accepts mismatched JSX tags without an ERROR node"}}

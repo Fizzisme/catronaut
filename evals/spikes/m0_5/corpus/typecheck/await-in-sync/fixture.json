@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "typecheck", "rules": [], "note": "Babel rejects it too; does tree-sitter?"}}

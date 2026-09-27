@@ -1,6 +1,7 @@
 # Preview contract
 
-- **Version:** v1 · 2026-09-26 · from the M0.3 spike ([ADR-0002](adr/0002-preview-runtime.md))
+- **Version:** v2 · 2026-09-27 · from the M0.3 spike ([ADR-0002](adr/0002-preview-runtime.md));
+  v2 adds the Server/Client boundary rules found in M0.5 ([ADR-0004](adr/0004-static-verification.md))
 - **Audience:** the agent's prompts and verifiers (M0.5, M2.6) and the frontend team that owns the
   preview runtime.
 
@@ -28,13 +29,13 @@ the preview silently accepts it.
 
 | Feature | Notes |
 |---|---|
-| `"use client"` | Harmless in the preview; needed for hooks and event handlers in the real build. |
+| `"use client"` | Harmless in the preview; needed for hooks and event handlers in the real build. A file without it is a Server Component when a page or layout reaches it through imports without passing a `"use client"` file (see Forbidden). |
 | `export const metadata` with `title` (string or `{ default, template, absolute }`) and `description` | Other metadata fields are ignored by the preview. |
 | `next/link` | `href` string or `{ pathname, query, hash }`; `replace`, `scroll`. |
-| `next/image` | Remote `src` only; the host must also be listed in `next.config.ts` `images.remotePatterns` for the real build. `fill`, `priority`, `sizes`, `width`/`height`. No static image imports. |
+| `next/image` | Remote `src` only (no local paths such as `/team.jpg`); the host must also be listed in `next.config.ts` `images.remotePatterns` for the real build. `fill`, `priority`, `sizes`, `width`/`height`. No static image imports. |
 | `next/font/google` | Any family, `weight`, `style`, `variable`, `subsets`, `fallback`. |
 | `next/navigation` | `useRouter`, `usePathname`, `useSearchParams`, `useParams`, `notFound`, `redirect`, `permanentRedirect`. `useSelectedLayoutSegment(s)` is approximate (segments from the URL root, not from the calling layout) and untested. |
-| `next/dynamic` | `dynamic(() => import(...), { ssr: false, loading })` — use it for WebGL/three scenes. |
+| `next/dynamic` | `dynamic(() => import(...), { ssr: false, loading })` — use it for WebGL/three scenes, and call it only inside a `"use client"` file: `ssr: false` in a Server Component fails `next build`. |
 | `params` / `searchParams` | As promises (Next.js 15+): read with `use(params)` or `await params` in an `async` page or layout. |
 | `async` **page** or **layout** | Supported. It is called once per URL; keep it free of hooks. |
 | Tailwind CSS v4 | `app/globals.css` with `@import "tailwindcss";`, `@theme`, `@apply`, imported from the root layout. |
@@ -44,7 +45,10 @@ the preview silently accepts it.
 | Construct | Why | Enforced by |
 |---|---|---|
 | `"use server"`, Server Actions (`<form action={serverFn}>`) | No server. The preview **silently runs the function in the browser**. | M0.5 |
-| `app/**/route.ts` (route handlers), `middleware.ts` | No server; the preview skips them. | M0.5 |
+| `app/**/route.ts` (route handlers), `middleware.ts`, `proxy.ts` | No server; the preview skips them. | M0.5 |
+| In a Server Component: hooks other than `use`, `useId`, `useMemo`, `useCallback`, `useDebugValue`; `createContext`; event handlers (`onClick`, …) on DOM elements | The preview renders them; `next build` fails. Add `"use client"` to the file. | M0.5 |
+| Functions passed as props from a Server Component to a Client Component | Functions cannot cross the Server → Client boundary; `next build` fails. | M0.5 |
+| `next/*` entry points without a shim (`next/router`, …) | Only `next`, `next/link`, `next/image`, `next/font/google`, `next/navigation` and `next/dynamic` exist in the preview. | preview · M0.5 |
 | `next/headers`, `next/server`, `next/cache`, `next/og`, `next/script` | Server-only or third-party script injection. | preview |
 | `server-only` | Server-only marker. | preview |
 | `next/font/local` | Needs binary font files. Use `next/font/google`. | preview |

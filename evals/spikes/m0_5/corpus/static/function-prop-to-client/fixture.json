@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "static", "rules": ["client.boundary"], "note": "functions cannot cross the Server -> Client boundary"}}

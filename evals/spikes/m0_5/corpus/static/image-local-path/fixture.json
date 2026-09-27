@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "static", "rules": ["image.src"], "note": "a public/ file would be a binary asset"}}

@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "build", "rules": [], "note": "client components are prerendered too; localStorage is undefined on the server"}}

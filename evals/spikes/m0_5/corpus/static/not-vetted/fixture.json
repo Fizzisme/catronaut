@@ -1,0 +1,1 @@
+{"base": "starter", "dependencies": {"axios": "1.12.2"}, "expect": {"layer": "static", "rules": ["package.not-vetted"]}}
