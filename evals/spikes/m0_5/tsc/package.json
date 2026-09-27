@@ -1,0 +1,27 @@
+{
+  "name": "m0-5-tsc-baseline",
+  "private": true,
+  "description": "Type-check baseline for the M0.5 spike: the packages a real Next.js project would have, so tsc sees the same types. Installed with --ignore-scripts; nothing here is ever run except tsc.",
+  "dependencies": {
+    "next": "16.0.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "motion": "13.4.4",
+    "lenis": "1.3.26",
+    "three": "0.186.1",
+    "@react-three/fiber": "9.8.1",
+    "@react-three/drei": "10.7.9",
+    "lucide-react": "1.48.0",
+    "clsx": "2.1.1",
+    "tailwind-merge": "3.7.0",
+    "gsap": "3.15.0",
+    "@gsap/react": "2.1.2"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@types/node": "22.20.4",
+    "@types/three": "0.186.0"
+  }
+}

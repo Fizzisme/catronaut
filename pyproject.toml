@@ -26,6 +26,8 @@ evals = [
     "httpx>=0.28.1",
     "openai>=3.19.2",
     "playwright>=1.63.0",
+    "tree-sitter>=0.26.0",
+    "tree-sitter-typescript>=0.23.2",
 ]
 
 [tool.uv]

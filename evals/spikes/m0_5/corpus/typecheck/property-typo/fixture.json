@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "typecheck", "rules": [], "note": "renders an empty heading, no error anywhere"}}
