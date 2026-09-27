@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "typecheck", "rules": [], "note": "string passed to a number prop; renders fine"}}

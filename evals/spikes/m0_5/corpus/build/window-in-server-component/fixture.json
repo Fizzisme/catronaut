@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "build", "rules": [], "note": "fine in the browser preview; next build prerender throws ReferenceError"}}

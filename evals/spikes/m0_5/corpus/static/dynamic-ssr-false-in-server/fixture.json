@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "static", "rules": ["client.dynamic-ssr-false"], "note": "the pattern the contract recommends, written in a Server Component"}}

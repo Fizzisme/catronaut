@@ -9,6 +9,8 @@ __pycache__/
 m0_2_results/
 m0_2_results.tgz
 m0_3_results/
+m0_5_results/
+evals/spikes/m0_5/tsc/work/
 node_modules/
 .idea/
 evals/spikes/m0_3/harness/dist/

@@ -1,0 +1,1 @@
+{"base": "starter", "expect": {"layer": "typecheck", "rules": [], "note": "react-router habit: `to` instead of `href`"}}
