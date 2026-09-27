@@ -5,6 +5,8 @@ description = "Catronaut agent harness (ai-service)"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.141.1",
+    "openai>=3.19.2",
+    "pydantic>=2.13.5",
     "uvicorn[standard]>=0.54.0",
 ]
 
@@ -24,7 +26,6 @@ dev = [
 ]
 evals = [
     "httpx>=0.28.1",
-    "openai>=3.19.2",
     "playwright>=1.63.0",
     "tree-sitter>=0.26.0",
     "tree-sitter-typescript>=0.23.2",

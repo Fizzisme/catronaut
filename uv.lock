@@ -39,6 +39,8 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
+    { name = "openai" },
+    { name = "pydantic" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -51,7 +53,6 @@ dev = [
 ]
 evals = [
     { name = "httpx" },
-    { name = "openai" },
     { name = "playwright" },
     { name = "tree-sitter" },
     { name = "tree-sitter-typescript" },
@@ -60,6 +61,8 @@ evals = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "openai", specifier = ">=3.19.2" },
+    { name = "pydantic", specifier = ">=2.13.5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
 ]
 
@@ -72,7 +75,6 @@ dev = [
 ]
 evals = [
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "openai", specifier = ">=3.19.2" },
     { name = "playwright", specifier = ">=1.63.0" },
     { name = "tree-sitter", specifier = ">=0.26.0" },
     { name = "tree-sitter-typescript", specifier = ">=0.23.2" },
