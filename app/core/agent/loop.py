@@ -4,10 +4,11 @@ Book guide ch01 §1.1.5: every tool call in a turn is handled, and every exit is
 caller never mistakes "produced an answer" for "completed the task".
 """
 
+import asyncio
 import hashlib
 import json
 from collections import Counter
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
@@ -62,6 +63,9 @@ class AgentLimits:
     max_repeated_calls: int = 3
     # Failed steps in a row before the run fails; a step that succeeds resets the count
     max_consecutive_failures: int = 3
+    # Wall clock for the whole run. A placeholder until Phase 2 measures real runs: a step that
+    # generates 5K tokens takes ~2–4 min (ADR-0001)
+    max_duration_s: float = 1800.0
 
 
 @dataclass(frozen=True)
@@ -121,22 +125,39 @@ class AgentLoop:
         fingerprints: Counter[str] = Counter()
         max_failures = self._limits.max_consecutive_failures
         consecutive_failures = 0
+        # One absolute deadline: the safe points check it, and every model and tool call is
+        # bounded by it, so a single long call cannot run past the limit
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._limits.max_duration_s
+        time_limit = f"reached the time limit ({self._limits.max_duration_s:g} s)"
 
         def finish(status: RunStatus, reason: str, steps: int) -> RunFinished:
             return RunFinished(status, reason, tuple(history[start:]), steps)
 
         for step in range(1, max_steps + 1):
+            if loop.time() >= deadline:
+                yield finish("stopped_at_limit", time_limit, step - 1)
+                return
             yield StepStarted(step, max_steps)
 
             completion: Completion | None = None
+            stream = self._llm.stream(history, self._specs or None)
             try:
-                async for event in self._llm.stream(history, self._specs or None):
+                while True:
+                    # The deadline bounds each read, never a `yield`: if it spanned a yield it
+                    # could fire in the caller's code instead of here
+                    event = await _before_deadline(deadline, anext(stream, None))
+                    if event is None:
+                        break
                     yield event
                     if isinstance(event, Completion):
                         completion = event
             except LLMError as exc:
                 # The client already retried what could be retried
                 yield finish("failed", f"model call failed: {exc}", step)
+                return
+            except _OutOfTime:
+                yield finish("stopped_at_limit", time_limit, step)
                 return
             if completion is None:
                 yield finish("failed", "model stream ended without a completion", step)
@@ -164,9 +185,22 @@ class AgentLoop:
             # Every call gets a result before the next model request, in the order the model
             # made them, so the trajectory stays valid for the chat template
             repeated: list[ToolCall] = []
+            out_of_time = False
             for call in completion.message.tool_calls:
+                if out_of_time or loop.time() >= deadline:
+                    # Never started, but still paired so the history stays valid
+                    out_of_time = True
+                    history.append(ToolResultMessage(tool_call_id=call.id, content=_NOT_RUN))
+                    continue
                 yield ToolCallStarted(step, call)
-                result = await self._execute(call)
+                try:
+                    result = await _before_deadline(deadline, self._execute(call))
+                except _OutOfTime:
+                    out_of_time = True
+                    result = ToolResult(_INTERRUPTED, is_error=True)
+                    history.append(ToolResultMessage(tool_call_id=call.id, content=result.content))
+                    yield ToolCallFinished(step, call.id, result)
+                    continue
                 # Fingerprint the tool's own result, before any note is added to it
                 fingerprint = _fingerprint(call, result)
                 fingerprints[fingerprint] += 1
@@ -183,6 +217,9 @@ class AgentLoop:
                 yield ToolCallFinished(step, call.id, result)
 
             # Checked after the turn, so the run still ends on paired results
+            if out_of_time:
+                yield finish("stopped_at_limit", time_limit, step)
+                return
             if repeated:
                 reason = (
                     f"tool '{repeated[0].name}' returned the same result for the same arguments "
@@ -218,6 +255,26 @@ def _fingerprint(call: ToolCall, result: ToolResult) -> str:
         arguments = call.arguments
     payload = json.dumps([call.name, arguments, result.content, result.is_error])
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+class _OutOfTime(Exception):
+    """The run's own deadline passed; any other TimeoutError is not ours and propagates."""
+
+
+async def _before_deadline[T](deadline: float, awaitable: Awaitable[T]) -> T:
+    """Await `awaitable`, cancelling it at `deadline` (event-loop time)."""
+    timeout = asyncio.timeout_at(deadline)
+    try:
+        async with timeout:
+            return await awaitable
+    except TimeoutError:
+        if timeout.expired():
+            raise _OutOfTime from None
+        raise
+
+
+_INTERRUPTED = "Error: the run reached its time limit while this tool was running."
+_NOT_RUN = "Error: not run; the run reached its time limit before this call started."
 
 
 def _truncation_notice(completion: Completion) -> str:

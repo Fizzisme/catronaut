@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -50,14 +51,17 @@ def call(id: str, name: str = "echo", arguments: str = "{}") -> ToolCall:
 class FakeModel:
     """Replays scripted responses and records the history it was sent each time."""
 
-    def __init__(self, *script: Completion | Exception) -> None:
+    def __init__(self, *script: Completion | Exception, delay: float = 0) -> None:
         self._script = list(script)
+        self._delay = delay
         self.requests: list[list[Message]] = []
 
     async def stream(
         self, messages: Sequence[Message], tools: Sequence[dict[str, Any]] | None = None
     ) -> AsyncIterator[StreamEvent]:
         self.requests.append(list(messages))
+        # Like the time to first token of a long context
+        await asyncio.sleep(self._delay)
         item = self._script.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -86,6 +90,26 @@ class ArgsBlindTool:
 
     async def run(self, arguments: str) -> ToolResult:
         return ToolResult("ok")
+
+
+class SlowTool:
+    name = "slow"
+    spec: dict[str, Any] = {"type": "function", "function": {"name": "slow", "parameters": {}}}
+
+    async def run(self, arguments: str) -> ToolResult:
+        await asyncio.sleep(10)
+        return ToolResult("finished")
+
+
+class BlockingTool:
+    """Blocks the event loop, so a timeout cannot interrupt it; only the next safe point can."""
+
+    name = "blocking"
+    spec: dict[str, Any] = {"type": "function", "function": {"name": "blocking", "parameters": {}}}
+
+    async def run(self, arguments: str) -> ToolResult:
+        time.sleep(0.5)
+        return ToolResult("finished")
 
 
 class BrokenTool:
@@ -323,3 +347,40 @@ def test_arguments_that_differ_only_in_formatting_are_the_same_call() -> None:
     events = run(AgentLoop(model, [ArgsBlindTool()]))
 
     assert finished(events).status == "failed"
+
+
+def test_a_slow_model_call_is_cut_at_the_time_limit() -> None:
+    model = FakeModel(reply("never streamed"), delay=10)
+    started = time.monotonic()
+    result = finished(run(AgentLoop(model, [EchoTool()], AgentLimits(max_duration_s=0.05))))
+
+    assert result.status == "stopped_at_limit"
+    assert "time limit" in result.reason
+    assert result.messages == ()
+    assert time.monotonic() - started < 5
+
+
+def test_a_slow_tool_is_cut_and_every_call_in_the_turn_is_still_paired() -> None:
+    model = FakeModel(reply("", call("a", name="slow"), call("b", name="slow")))
+    events = run(AgentLoop(model, [SlowTool()], AgentLimits(max_duration_s=0.2)))
+
+    result = finished(events)
+    assert result.status == "stopped_at_limit"
+    assert len(model.requests) == 1
+    a, b = result.messages[-2:]
+    assert isinstance(a, ToolResultMessage) and a.tool_call_id == "a"
+    assert "while this tool was running" in a.content
+    assert isinstance(b, ToolResultMessage) and b.tool_call_id == "b"
+    assert "not run" in b.content
+    # Only the call that started is reported as finished
+    assert [e.call_id for e in events if isinstance(e, ToolCallFinished)] == ["a"]
+
+
+def test_the_safe_point_stops_a_run_that_a_timeout_could_not_interrupt() -> None:
+    model = FakeModel(reply("", call("a", name="blocking")), reply("never requested"))
+    result = finished(run(AgentLoop(model, [BlockingTool()], AgentLimits(max_duration_s=0.2))))
+
+    assert result.status == "stopped_at_limit"
+    assert result.steps == 1
+    assert len(model.requests) == 1
+    assert result.messages[-1] == ToolResultMessage(tool_call_id="a", content="finished")
