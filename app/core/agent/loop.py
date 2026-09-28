@@ -4,8 +4,11 @@ Book guide ch01 §1.1.5: every tool call in a turn is handled, and every exit is
 caller never mistakes "produced an answer" for "completed the task".
 """
 
+import hashlib
+import json
+from collections import Counter
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
 from app.core.llm import (
@@ -54,6 +57,8 @@ class ModelClient(Protocol):
 @dataclass(frozen=True)
 class AgentLimits:
     max_steps: int = 40
+    # Times the same call may return the same result before the run is judged stuck
+    max_repeated_calls: int = 3
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,10 @@ class AgentLoop:
         history: list[Message] = list(messages)
         start = len(history)
         max_steps = self._limits.max_steps
+        max_repeated = self._limits.max_repeated_calls
+        # Repeats are judged on (tool, arguments, result): re-reading a file after an edit
+        # returns new content and is progress, not a loop
+        fingerprints: Counter[str] = Counter()
 
         def finish(status: RunStatus, reason: str, steps: int) -> RunFinished:
             return RunFinished(status, reason, tuple(history[start:]), steps)
@@ -141,11 +150,33 @@ class AgentLoop:
 
             # Every call gets a result before the next model request, in the order the model
             # made them, so the trajectory stays valid for the chat template
+            repeated: ToolCall | None = None
             for call in completion.message.tool_calls:
                 yield ToolCallStarted(step, call)
                 result = await self._execute(call)
+                # Fingerprint the tool's own result, before any note is added to it
+                fingerprint = _fingerprint(call, result)
+                fingerprints[fingerprint] += 1
+                count = fingerprints[fingerprint]
+                if count >= max_repeated:
+                    repeated = repeated or call
+                elif count > 1:
+                    # A repeat below the limit may be legitimate (re-reading before an edit),
+                    # so the model is told, not stopped, and gets a chance to change course
+                    result = replace(
+                        result, content=f"{result.content}\n\n{_repeat_note(max_repeated)}"
+                    )
                 history.append(ToolResultMessage(tool_call_id=call.id, content=result.content))
                 yield ToolCallFinished(step, call.id, result)
+
+            # Checked after the turn, so the run still ends on paired results
+            if repeated is not None:
+                reason = (
+                    f"tool '{repeated.name}' returned the same result for the same arguments "
+                    f"{max_repeated} times"
+                )
+                yield finish("failed", reason, step)
+                return
 
         yield finish("stopped_at_limit", f"reached the step limit ({max_steps})", max_steps)
 
@@ -164,3 +195,21 @@ class AgentLoop:
             return ToolResult(
                 f"Error: tool '{call.name}' failed: {type(exc).__name__}: {exc}", is_error=True
             )
+
+
+def _fingerprint(call: ToolCall, result: ToolResult) -> str:
+    """Digest of a call and its result; arguments are compared as JSON, not as formatted text."""
+    try:
+        arguments = json.dumps(json.loads(call.arguments), sort_keys=True)
+    except json.JSONDecodeError:
+        arguments = call.arguments
+    payload = json.dumps([call.name, arguments, result.content, result.is_error])
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _repeat_note(max_repeated: int) -> str:
+    return (
+        "Note: this exact call already returned this exact result earlier in the run. "
+        "If you are stuck, try a different approach; the run stops once the same call "
+        f"returns the same result {max_repeated} times."
+    )

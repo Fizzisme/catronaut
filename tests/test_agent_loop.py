@@ -78,12 +78,36 @@ class EchoTool:
         return ToolResult(f"echo {arguments}")
 
 
+class ArgsBlindTool:
+    """Returns the same result whatever the arguments' formatting."""
+
+    name = "echo"
+    spec: dict[str, Any] = {"type": "function", "function": {"name": "echo", "parameters": {}}}
+
+    async def run(self, arguments: str) -> ToolResult:
+        return ToolResult("ok")
+
+
 class BrokenTool:
     name = "broken"
     spec: dict[str, Any] = {"type": "function", "function": {"name": "broken", "parameters": {}}}
 
     async def run(self, arguments: str) -> ToolResult:
         raise ValueError("disk on fire")
+
+
+class PageTool:
+    """Returns a new version of the page on every read, like re-reading a file after an edit."""
+
+    name = "read"
+    spec: dict[str, Any] = {"type": "function", "function": {"name": "read", "parameters": {}}}
+
+    def __init__(self) -> None:
+        self.version = 0
+
+    async def run(self, arguments: str) -> ToolResult:
+        self.version += 1
+        return ToolResult(f"page.tsx v{self.version}")
 
 
 def run(loop: AgentLoop, messages: Sequence[Message] = PROMPT) -> list[AgentEvent]:
@@ -182,3 +206,81 @@ def test_truncated_output_fails_the_run_and_its_calls_are_not_executed() -> None
     assert result.status == "failed"
     assert "max_tokens" in result.reason
     assert echo.calls == []
+
+
+def test_same_call_with_the_same_result_three_times_fails_the_run() -> None:
+    echo = EchoTool()
+    model = FakeModel(
+        reply("", call("a", arguments='{"path": "page.tsx"}')),
+        reply("", call("b", arguments='{"path": "page.tsx"}')),
+        reply("", call("c", arguments='{"path": "page.tsx"}')),
+        reply("never requested"),
+    )
+    result = finished(run(AgentLoop(model, [echo])))
+
+    assert result.status == "failed"
+    assert "same result for the same arguments 3 times" in result.reason
+    assert result.steps == 3
+    assert len(model.requests) == 3
+    assert isinstance(result.messages[-1], ToolResultMessage)
+
+
+def test_a_repeat_below_the_limit_gets_a_note_the_model_can_act_on() -> None:
+    model = FakeModel(
+        reply("", call("a")),
+        reply("", call("b")),
+        reply("Trying something else."),
+    )
+    events = run(AgentLoop(model, [EchoTool()]))
+
+    assert finished(events).status == "done"
+    first, second = [
+        event.result.content for event in events if isinstance(event, ToolCallFinished)
+    ]
+    assert first == "echo {}"
+    assert second.startswith("echo {}\n\n")
+    assert "already returned this exact result" in second
+    # The model reads the note in the next request
+    assert model.requests[2][-1] == ToolResultMessage(tool_call_id="b", content=second)
+
+
+def test_same_call_with_a_new_result_is_progress() -> None:
+    model = FakeModel(
+        reply("", call("a", name="read")),
+        reply("", call("b", name="read")),
+        reply("", call("c", name="read")),
+        reply("", call("d", name="read")),
+        reply("Done."),
+    )
+    events = run(AgentLoop(model, [PageTool()]))
+
+    assert finished(events).status == "done"
+    results = [event.result.content for event in events if isinstance(event, ToolCallFinished)]
+    assert not any("already returned" in content for content in results)
+
+
+def test_repeats_within_one_turn_are_all_paired_before_failing() -> None:
+    model = FakeModel(
+        reply("", call("a"), call("b"), call("c"), call("d", arguments='{"n": 1}')),
+        reply("never requested"),
+    )
+    result = finished(run(AgentLoop(model, [EchoTool()])))
+
+    assert result.status == "failed"
+    assert [m.tool_call_id for m in result.messages if isinstance(m, ToolResultMessage)] == [
+        "a",
+        "b",
+        "c",
+        "d",
+    ]
+
+
+def test_arguments_that_differ_only_in_formatting_are_the_same_call() -> None:
+    model = FakeModel(
+        reply("", call("a", arguments='{"path": "p", "line": 1}')),
+        reply("", call("b", arguments='{"line":1,"path":"p"}')),
+        reply("", call("c", arguments='{ "path": "p",  "line": 1 }')),
+    )
+    events = run(AgentLoop(model, [ArgsBlindTool()]))
+
+    assert finished(events).status == "failed"
