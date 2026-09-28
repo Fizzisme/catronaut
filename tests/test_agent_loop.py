@@ -92,6 +92,18 @@ class ArgsBlindTool:
         return ToolResult("ok")
 
 
+class EditTool:
+    """Fails like an Edit whose `old_string` is not in the file, whenever it asks for 'missing'."""
+
+    name = "edit"
+    spec: dict[str, Any] = {"type": "function", "function": {"name": "edit", "parameters": {}}}
+
+    async def run(self, arguments: str) -> ToolResult:
+        if "missing" in arguments:
+            return ToolResult("Error: old_string not found", is_error=True)
+        return ToolResult("edited")
+
+
 class SlowTool:
     name = "slow"
     spec: dict[str, Any] = {"type": "function", "function": {"name": "slow", "parameters": {}}}
@@ -384,3 +396,64 @@ def test_the_safe_point_stops_a_run_that_a_timeout_could_not_interrupt() -> None
     assert result.steps == 1
     assert len(model.requests) == 1
     assert result.messages[-1] == ToolResultMessage(tool_call_id="a", content="finished")
+
+
+def edit(id: str, old: str) -> ToolCall:
+    return call(id, name="edit", arguments=f'{{"old": "{old}"}}')
+
+
+def test_a_tool_failing_three_times_in_a_row_fails_the_run() -> None:
+    # Different arguments each time, so this is the failure breaker, not a repeated call
+    model = FakeModel(
+        reply("", edit("a", "missing 1")),
+        reply("", edit("b", "missing 2")),
+        reply("", edit("c", "missing 3")),
+        reply("never requested"),
+    )
+    result = finished(run(AgentLoop(model, [EditTool()])))
+
+    assert result.status == "failed"
+    assert result.reason == "tool 'edit' failed 3 times in a row"
+    assert result.steps == 3
+    assert isinstance(result.messages[-1], ToolResultMessage)
+
+
+def test_another_tool_succeeding_does_not_reset_the_count() -> None:
+    model = FakeModel(
+        reply("", edit("a", "missing 1")),
+        reply("", call("b", arguments='{"n": 1}')),
+        reply("", edit("c", "missing 2")),
+        reply("", call("d", arguments='{"n": 2}')),
+        reply("", edit("e", "missing 3")),
+        reply("never requested"),
+    )
+    result = finished(run(AgentLoop(model, [EditTool(), EchoTool()])))
+
+    assert result.status == "failed"
+    assert "'edit' failed 3 times" in result.reason
+
+
+def test_the_same_tool_succeeding_resets_the_count() -> None:
+    model = FakeModel(
+        reply("", edit("a", "missing 1")),
+        reply("", edit("b", "missing 2")),
+        reply("", edit("c", "button")),
+        reply("", edit("d", "missing 3")),
+        reply("", edit("e", "missing 4")),
+        reply("Done."),
+    )
+    result = finished(run(AgentLoop(model, [EditTool()])))
+
+    assert result.status == "done"
+
+
+def test_an_invented_tool_called_three_times_fails_the_run() -> None:
+    model = FakeModel(
+        reply("", call("a", name="Deploy", arguments='{"env": 1}')),
+        reply("", call("b", name="Deploy", arguments='{"env": 2}')),
+        reply("", call("c", name="Deploy", arguments='{"env": 3}')),
+    )
+    result = finished(run(AgentLoop(model, [EchoTool()])))
+
+    assert result.status == "failed"
+    assert result.reason == "tool 'Deploy' failed 3 times in a row"

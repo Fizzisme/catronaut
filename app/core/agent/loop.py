@@ -61,7 +61,8 @@ class AgentLimits:
     max_steps: int = 40
     # Times the same call may return the same result before the run is judged stuck
     max_repeated_calls: int = 3
-    # Failed steps in a row before the run fails; a step that succeeds resets the count
+    # Failures in a row before the run fails, counted separately for truncated model output and
+    # for each tool name; a success of the same kind resets its count
     max_consecutive_failures: int = 3
     # Wall clock for the whole run. A placeholder until Phase 2 measures real runs: a step that
     # generates 5K tokens takes ~2–4 min (ADR-0001)
@@ -124,7 +125,9 @@ class AgentLoop:
         # returns new content and is progress, not a loop
         fingerprints: Counter[str] = Counter()
         max_failures = self._limits.max_consecutive_failures
-        consecutive_failures = 0
+        consecutive_truncations = 0
+        # Per tool name, so a failing Edit is not reset by a successful Read in between
+        tool_failures: Counter[str] = Counter()
         # One absolute deadline: the safe points check it, and every model and tool call is
         # bounded by it, so a single long call cannot run past the limit
         loop = asyncio.get_running_loop()
@@ -167,14 +170,14 @@ class AgentLoop:
             if completion.truncated:
                 # Degrade and continue (ch05 §5.1.5): the cut-off calls never run (M1.1), and the
                 # model is told why so it can split the work into smaller calls
-                consecutive_failures += 1
-                if consecutive_failures >= max_failures:
+                consecutive_truncations += 1
+                if consecutive_truncations >= max_failures:
                     reason = f"model output was cut off at max_tokens {max_failures} times in a row"
                     yield finish("failed", reason, step)
                     return
                 history.append(UserMessage(content=_truncation_notice(completion)))
                 continue
-            consecutive_failures = 0
+            consecutive_truncations = 0
             if completion.finish_reason == "other":
                 yield finish("failed", "model stopped for an unexpected reason", step)
                 return
@@ -185,6 +188,7 @@ class AgentLoop:
             # Every call gets a result before the next model request, in the order the model
             # made them, so the trajectory stays valid for the chat template
             repeated: list[ToolCall] = []
+            failing: list[str] = []
             out_of_time = False
             for call in completion.message.tool_calls:
                 if out_of_time or loop.time() >= deadline:
@@ -201,6 +205,12 @@ class AgentLoop:
                     history.append(ToolResultMessage(tool_call_id=call.id, content=result.content))
                     yield ToolCallFinished(step, call.id, result)
                     continue
+                if result.is_error:
+                    tool_failures[call.name] += 1
+                    if tool_failures[call.name] >= max_failures:
+                        failing.append(call.name)
+                else:
+                    tool_failures[call.name] = 0
                 # Fingerprint the tool's own result, before any note is added to it
                 fingerprint = _fingerprint(call, result)
                 fingerprints[fingerprint] += 1
@@ -226,6 +236,11 @@ class AgentLoop:
                     f"{max_repeated} times"
                 )
                 yield finish("failed", reason, step)
+                return
+            if failing:
+                yield finish(
+                    "failed", f"tool '{failing[0]}' failed {max_failures} times in a row", step
+                )
                 return
 
         yield finish("stopped_at_limit", f"reached the step limit ({max_steps})", max_steps)
