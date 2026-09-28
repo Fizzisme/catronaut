@@ -198,14 +198,53 @@ def test_model_error_fails_the_run() -> None:
     assert result.messages == ()
 
 
-def test_truncated_output_fails_the_run_and_its_calls_are_not_executed() -> None:
+def test_truncated_output_is_not_executed_and_the_model_is_told_to_split_it() -> None:
     echo = EchoTool()
-    model = FakeModel(reply("", call("a"), finish="length"))
+    model = FakeModel(
+        reply("Writing the page", call("a"), finish="length"),
+        reply("", call("b", arguments='{"part": 1}')),
+        reply("Done."),
+    )
+    result = finished(run(AgentLoop(model, [echo])))
+
+    assert result.status == "done"
+    assert echo.calls == ['{"part": 1}']
+    # The cut-off message stays in history, followed by a notice the model reads next
+    truncated, notice = model.requests[1][-2:]
+    assert truncated == AssistantMessage(content="Writing the page")
+    assert isinstance(notice, UserMessage)
+    assert "cut off" in notice.content
+    assert "'echo'" in notice.content
+
+
+def test_truncated_output_too_many_times_in_a_row_fails_the_run() -> None:
+    echo = EchoTool()
+    model = FakeModel(
+        reply("", call("a"), finish="length"),
+        reply("", call("b"), finish="length"),
+        reply("", call("c"), finish="length"),
+        reply("never requested"),
+    )
     result = finished(run(AgentLoop(model, [echo])))
 
     assert result.status == "failed"
-    assert "max_tokens" in result.reason
+    assert "max_tokens 3 times in a row" in result.reason
+    assert result.steps == 3
     assert echo.calls == []
+
+
+def test_a_successful_step_resets_the_failure_count() -> None:
+    model = FakeModel(
+        reply("", call("a"), finish="length"),
+        reply("", call("b"), finish="length"),
+        reply("", call("c")),
+        reply("", call("d"), finish="length"),
+        reply("", call("e"), finish="length"),
+        reply("Done."),
+    )
+    result = finished(run(AgentLoop(model, [EchoTool()])))
+
+    assert result.status == "done"
 
 
 def test_same_call_with_the_same_result_three_times_fails_the_run() -> None:

@@ -18,6 +18,7 @@ from app.core.llm import (
     StreamEvent,
     ToolCall,
     ToolResultMessage,
+    UserMessage,
 )
 
 RunStatus = Literal["done", "needs_input", "stopped_at_limit", "failed", "cancelled"]
@@ -59,6 +60,8 @@ class AgentLimits:
     max_steps: int = 40
     # Times the same call may return the same result before the run is judged stuck
     max_repeated_calls: int = 3
+    # Failed steps in a row before the run fails; a step that succeeds resets the count
+    max_consecutive_failures: int = 3
 
 
 @dataclass(frozen=True)
@@ -116,6 +119,8 @@ class AgentLoop:
         # Repeats are judged on (tool, arguments, result): re-reading a file after an edit
         # returns new content and is progress, not a loop
         fingerprints: Counter[str] = Counter()
+        max_failures = self._limits.max_consecutive_failures
+        consecutive_failures = 0
 
         def finish(status: RunStatus, reason: str, steps: int) -> RunFinished:
             return RunFinished(status, reason, tuple(history[start:]), steps)
@@ -139,8 +144,16 @@ class AgentLoop:
 
             history.append(completion.message)
             if completion.truncated:
-                yield finish("failed", "model output was cut off at max_tokens", step)
-                return
+                # Degrade and continue (ch05 §5.1.5): the cut-off calls never run (M1.1), and the
+                # model is told why so it can split the work into smaller calls
+                consecutive_failures += 1
+                if consecutive_failures >= max_failures:
+                    reason = f"model output was cut off at max_tokens {max_failures} times in a row"
+                    yield finish("failed", reason, step)
+                    return
+                history.append(UserMessage(content=_truncation_notice(completion)))
+                continue
+            consecutive_failures = 0
             if completion.finish_reason == "other":
                 yield finish("failed", "model stopped for an unexpected reason", step)
                 return
@@ -150,7 +163,7 @@ class AgentLoop:
 
             # Every call gets a result before the next model request, in the order the model
             # made them, so the trajectory stays valid for the chat template
-            repeated: ToolCall | None = None
+            repeated: list[ToolCall] = []
             for call in completion.message.tool_calls:
                 yield ToolCallStarted(step, call)
                 result = await self._execute(call)
@@ -159,7 +172,7 @@ class AgentLoop:
                 fingerprints[fingerprint] += 1
                 count = fingerprints[fingerprint]
                 if count >= max_repeated:
-                    repeated = repeated or call
+                    repeated.append(call)
                 elif count > 1:
                     # A repeat below the limit may be legitimate (re-reading before an edit),
                     # so the model is told, not stopped, and gets a chance to change course
@@ -170,9 +183,9 @@ class AgentLoop:
                 yield ToolCallFinished(step, call.id, result)
 
             # Checked after the turn, so the run still ends on paired results
-            if repeated is not None:
+            if repeated:
                 reason = (
-                    f"tool '{repeated.name}' returned the same result for the same arguments "
+                    f"tool '{repeated[0].name}' returned the same result for the same arguments "
                     f"{max_repeated} times"
                 )
                 yield finish("failed", reason, step)
@@ -205,6 +218,16 @@ def _fingerprint(call: ToolCall, result: ToolResult) -> str:
         arguments = call.arguments
     payload = json.dumps([call.name, arguments, result.content, result.is_error])
     return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _truncation_notice(completion: Completion) -> str:
+    notice = "Your previous response hit the output token limit and was cut off."
+    if completion.truncated_tool_calls:
+        names = ", ".join(f"'{call.name}'" for call in completion.truncated_tool_calls)
+        notice += f" These tool calls were incomplete and were not run: {names}."
+    return (
+        f"{notice} Keep each response shorter: split large content into several smaller tool calls."
+    )
 
 
 def _repeat_note(max_repeated: int) -> str:
