@@ -225,6 +225,7 @@ after prompt, tool, constraint and context fixes have been tried.
 | `project-service` Phase 1 has no files, file history or lease (M0.4). | `files` module agreed with the `project-service` team (ADR-0003 Decision 7); `LocalWorkspace` implements the same semantics so Phase 1 does not wait for it. |
 | Services trust `X-User-Id` by convention; the network does not enforce it (gateway review, M0.4). | `ai-service` and `project-service` reachable only from the internal network (ADR-0003 Decision 13); verified in M6.4. |
 | The user edits files while a run is in progress. | Project lease and optimistic concurrency (M0.4, M1.4). |
+| Output cut off at `max_tokens` is discarded and regenerated in smaller calls, so a long file costs its output twice (M1.2). | Tool descriptions and the prompt ask for large files in parts (M1.3, M1.6). If evaluation shows frequent truncation of sound output, continue the cut-off message with vLLM `continue_final_message` instead; it depends on the chat template and tool parser, so it is built and tested per model. |
 
 ## 9. Sources
 
