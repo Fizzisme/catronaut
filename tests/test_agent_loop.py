@@ -457,3 +457,44 @@ def test_an_invented_tool_called_three_times_fails_the_run() -> None:
 
     assert result.status == "failed"
     assert result.reason == "tool 'Deploy' failed 3 times in a row"
+
+
+def test_the_run_reports_the_tokens_of_every_model_call() -> None:
+    model = FakeModel(reply("", call("a")), reply("Done."))
+    result = finished(run(AgentLoop(model, [EchoTool()])))
+
+    assert result.status == "done"
+    assert result.usage == Usage(20, 10)
+
+
+def test_the_token_limit_stops_the_run_before_the_next_model_call() -> None:
+    echo = EchoTool()
+    model = FakeModel(
+        reply("", call("a", arguments='{"n": 1}')),
+        reply("", call("b", arguments='{"n": 2}')),
+        reply("never requested"),
+    )
+    # 15 tokens per call: 30 after the second call, so the third is never made
+    result = finished(run(AgentLoop(model, [echo], AgentLimits(max_run_tokens=30))))
+
+    assert result.status == "stopped_at_limit"
+    assert result.reason == "reached the token limit (30)"
+    assert result.steps == 2
+    assert len(model.requests) == 2
+    assert result.usage == Usage(20, 10)
+    # The calls of the last response still ran, so the run ends on a paired result
+    assert echo.calls == ['{"n": 1}', '{"n": 2}']
+    assert isinstance(result.messages[-1], ToolResultMessage)
+
+
+def test_truncated_output_still_counts_toward_the_token_limit() -> None:
+    model = FakeModel(
+        reply("", call("a"), finish="length"),
+        reply("", call("b"), finish="length"),
+        reply("never requested"),
+    )
+    result = finished(run(AgentLoop(model, [EchoTool()], AgentLimits(max_run_tokens=30))))
+
+    assert result.status == "stopped_at_limit"
+    assert "token limit" in result.reason
+    assert len(model.requests) == 2

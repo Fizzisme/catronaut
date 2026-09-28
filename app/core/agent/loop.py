@@ -19,6 +19,7 @@ from app.core.llm import (
     StreamEvent,
     ToolCall,
     ToolResultMessage,
+    Usage,
     UserMessage,
 )
 
@@ -67,6 +68,9 @@ class AgentLimits:
     # Wall clock for the whole run. A placeholder until Phase 2 measures real runs: a step that
     # generates 5K tokens takes ~2–4 min (ADR-0001)
     max_duration_s: float = 1800.0
+    # Prompt + completion tokens summed over every model call of the run. A placeholder until
+    # Phase 2 measures real runs: each step resends the whole history, so prompts dominate
+    max_run_tokens: int = 2_000_000
 
 
 @dataclass(frozen=True)
@@ -98,6 +102,8 @@ class RunFinished:
     # Messages the run appended to the history it was given
     messages: tuple[Message, ...]
     steps: int
+    # Summed over every model call that completed
+    usage: Usage
 
 
 AgentEvent = StepStarted | StreamEvent | ToolCallStarted | ToolCallFinished | RunFinished
@@ -133,13 +139,21 @@ class AgentLoop:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._limits.max_duration_s
         time_limit = f"reached the time limit ({self._limits.max_duration_s:g} s)"
+        max_run_tokens = self._limits.max_run_tokens
+        usage = Usage()
 
         def finish(status: RunStatus, reason: str, steps: int) -> RunFinished:
-            return RunFinished(status, reason, tuple(history[start:]), steps)
+            return RunFinished(status, reason, tuple(history[start:]), steps, usage)
 
         for step in range(1, max_steps + 1):
             if loop.time() >= deadline:
                 yield finish("stopped_at_limit", time_limit, step - 1)
+                return
+            # Checked before each model call, the only thing that spends tokens. A call's usage
+            # is known only when it completes, so the last call can overshoot the limit
+            if usage.prompt_tokens + usage.completion_tokens >= max_run_tokens:
+                reason = f"reached the token limit ({max_run_tokens})"
+                yield finish("stopped_at_limit", reason, step - 1)
                 return
             yield StepStarted(step, max_steps)
 
@@ -166,6 +180,10 @@ class AgentLoop:
                 yield finish("failed", "model stream ended without a completion", step)
                 return
 
+            usage = Usage(
+                usage.prompt_tokens + completion.usage.prompt_tokens,
+                usage.completion_tokens + completion.usage.completion_tokens,
+            )
             history.append(completion.message)
             if completion.truncated:
                 # Degrade and continue (ch05 §5.1.5): the cut-off calls never run (M1.1), and the
