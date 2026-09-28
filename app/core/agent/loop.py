@@ -121,8 +121,15 @@ class AgentLoop:
         self._specs = [tool.spec for tool in tools]
         self._limits = limits or AgentLimits()
 
-    async def run(self, messages: Sequence[Message]) -> AsyncIterator[AgentEvent]:
-        """Run from `messages` and stream events; the last event is always `RunFinished`."""
+    async def run(
+        self, messages: Sequence[Message], cancel: asyncio.Event | None = None
+    ) -> AsyncIterator[AgentEvent]:
+        """Run from `messages` and stream events; the last event is always `RunFinished`.
+
+        Setting `cancel` ends the run as `cancelled` at the next safe point: after a model
+        response or a tool result. Nothing in flight is interrupted.
+        """
+        cancel = cancel or asyncio.Event()
         history: list[Message] = list(messages)
         start = len(history)
         max_steps = self._limits.max_steps
@@ -146,6 +153,10 @@ class AgentLoop:
             return RunFinished(status, reason, tuple(history[start:]), steps, usage)
 
         for step in range(1, max_steps + 1):
+            # Safe point after the last tool result of a turn (or before the first step)
+            if cancel.is_set():
+                yield finish("cancelled", _CANCELLED_REASON, step - 1)
+                return
             if loop.time() >= deadline:
                 yield finish("stopped_at_limit", time_limit, step - 1)
                 return
@@ -185,6 +196,12 @@ class AgentLoop:
                 usage.completion_tokens + completion.usage.completion_tokens,
             )
             history.append(completion.message)
+            # Safe point after a model response: its calls never run, but are still paired
+            if cancel.is_set():
+                for call in completion.message.tool_calls:
+                    history.append(ToolResultMessage(tool_call_id=call.id, content=_CANCELLED))
+                yield finish("cancelled", _CANCELLED_REASON, step)
+                return
             if completion.truncated:
                 # Degrade and continue (ch05 §5.1.5): the cut-off calls never run (M1.1), and the
                 # model is told why so it can split the work into smaller calls
@@ -208,11 +225,17 @@ class AgentLoop:
             repeated: list[ToolCall] = []
             failing: list[str] = []
             out_of_time = False
+            cancelled = False
             for call in completion.message.tool_calls:
                 if out_of_time or loop.time() >= deadline:
                     # Never started, but still paired so the history stays valid
                     out_of_time = True
                     history.append(ToolResultMessage(tool_call_id=call.id, content=_NOT_RUN))
+                    continue
+                # Safe point after the previous tool result
+                if cancelled or cancel.is_set():
+                    cancelled = True
+                    history.append(ToolResultMessage(tool_call_id=call.id, content=_CANCELLED))
                     continue
                 yield ToolCallStarted(step, call)
                 try:
@@ -244,7 +267,11 @@ class AgentLoop:
                 history.append(ToolResultMessage(tool_call_id=call.id, content=result.content))
                 yield ToolCallFinished(step, call.id, result)
 
-            # Checked after the turn, so the run still ends on paired results
+            # Checked after the turn, so the run still ends on paired results. Cancellation first:
+            # once it is set, the calls after it are skipped before the clock is looked at
+            if cancelled:
+                yield finish("cancelled", _CANCELLED_REASON, step)
+                return
             if out_of_time:
                 yield finish("stopped_at_limit", time_limit, step)
                 return
@@ -308,6 +335,8 @@ async def _before_deadline[T](deadline: float, awaitable: Awaitable[T]) -> T:
 
 _INTERRUPTED = "Error: the run reached its time limit while this tool was running."
 _NOT_RUN = "Error: not run; the run reached its time limit before this call started."
+_CANCELLED = "Error: not run; the run was cancelled before this call started."
+_CANCELLED_REASON = "cancelled by request"
 
 
 def _truncation_notice(completion: Completion) -> str:

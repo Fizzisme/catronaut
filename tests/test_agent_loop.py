@@ -92,6 +92,39 @@ class ArgsBlindTool:
         return ToolResult("ok")
 
 
+class CancellingTool:
+    """Stands in for the user pressing cancel while this tool runs."""
+
+    name = "cancelling"
+    spec: dict[str, Any] = {
+        "type": "function",
+        "function": {"name": "cancelling", "parameters": {}},
+    }
+
+    def __init__(self, cancel: asyncio.Event) -> None:
+        self._cancel = cancel
+
+    async def run(self, arguments: str) -> ToolResult:
+        self._cancel.set()
+        return ToolResult("finished")
+
+
+class CancellingModel(FakeModel):
+    """Stands in for the user pressing cancel while the model is still answering."""
+
+    def __init__(self, cancel: asyncio.Event, *script: Completion) -> None:
+        super().__init__(*script)
+        self._cancel = cancel
+
+    async def stream(
+        self, messages: Sequence[Message], tools: Sequence[dict[str, Any]] | None = None
+    ) -> AsyncIterator[StreamEvent]:
+        async for event in super().stream(messages, tools):
+            if isinstance(event, Completion):
+                self._cancel.set()
+            yield event
+
+
 class EditTool:
     """Fails like an Edit whose `old_string` is not in the file, whenever it asks for 'missing'."""
 
@@ -146,9 +179,11 @@ class PageTool:
         return ToolResult(f"page.tsx v{self.version}")
 
 
-def run(loop: AgentLoop, messages: Sequence[Message] = PROMPT) -> list[AgentEvent]:
+def run(
+    loop: AgentLoop, messages: Sequence[Message] = PROMPT, cancel: asyncio.Event | None = None
+) -> list[AgentEvent]:
     async def collect() -> list[AgentEvent]:
-        return [event async for event in loop.run(messages)]
+        return [event async for event in loop.run(messages, cancel)]
 
     return asyncio.run(collect())
 
@@ -498,3 +533,62 @@ def test_truncated_output_still_counts_toward_the_token_limit() -> None:
     assert result.status == "stopped_at_limit"
     assert "token limit" in result.reason
     assert len(model.requests) == 2
+
+
+def test_a_run_cancelled_before_it_starts_never_calls_the_model() -> None:
+    cancel = asyncio.Event()
+    cancel.set()
+    model = FakeModel(reply("never requested"))
+    result = finished(run(AgentLoop(model, [EchoTool()]), cancel=cancel))
+
+    assert result.status == "cancelled"
+    assert result.steps == 0
+    assert model.requests == []
+
+
+def test_cancel_during_a_model_response_pairs_its_calls_without_running_them() -> None:
+    cancel = asyncio.Event()
+    echo = EchoTool()
+    model = CancellingModel(cancel, reply("Reading", call("a"), call("b")))
+    events = run(AgentLoop(model, [echo]), cancel=cancel)
+
+    result = finished(events)
+    assert result.status == "cancelled"
+    assert result.steps == 1
+    assert echo.calls == []
+    assert not any(isinstance(event, ToolCallStarted) for event in events)
+    # The response is kept, and each of its calls has a result
+    assert result.messages[0] == AssistantMessage(
+        content="Reading", tool_calls=(call("a"), call("b"))
+    )
+    assert [m.tool_call_id for m in result.messages[1:] if isinstance(m, ToolResultMessage)] == [
+        "a",
+        "b",
+    ]
+
+
+def test_cancel_during_a_tool_lets_it_finish_and_skips_the_rest_of_the_turn() -> None:
+    cancel = asyncio.Event()
+    echo = EchoTool()
+    model = FakeModel(reply("", call("a", name="cancelling"), call("b")), reply("never requested"))
+    events = run(AgentLoop(model, [CancellingTool(cancel), echo]), cancel=cancel)
+
+    result = finished(events)
+    assert result.status == "cancelled"
+    assert len(model.requests) == 1
+    assert echo.calls == []
+    a, b = result.messages[-2:]
+    # A tool is never interrupted: the one that was running reports its real result
+    assert a == ToolResultMessage(tool_call_id="a", content="finished")
+    assert isinstance(b, ToolResultMessage) and "cancelled" in b.content
+
+
+def test_cancel_during_the_last_tool_of_a_turn_stops_before_the_next_model_call() -> None:
+    cancel = asyncio.Event()
+    model = FakeModel(reply("", call("a", name="cancelling")), reply("never requested"))
+    result = finished(run(AgentLoop(model, [CancellingTool(cancel)]), cancel=cancel))
+
+    assert result.status == "cancelled"
+    assert result.steps == 1
+    assert len(model.requests) == 1
+    assert result.messages[-1] == ToolResultMessage(tool_call_id="a", content="finished")
