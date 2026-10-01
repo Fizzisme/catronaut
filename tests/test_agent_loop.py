@@ -26,6 +26,7 @@ from app.core.llm import (
     Usage,
     UserMessage,
 )
+from app.core.tools import BaseTool, ToolArgs, ToolDescription
 
 PROMPT = [UserMessage(content="build a landing page")]
 
@@ -179,6 +180,28 @@ class PageTool:
         return ToolResult(f"page.tsx v{self.version}")
 
 
+class ShoutArgs(ToolArgs):
+    text: str
+
+
+class ShoutTool(BaseTool[ShoutArgs]):
+    name = "shout"
+    description = ToolDescription.model_validate(
+        {
+            "summary": "Upper-case a text.",
+            "when_to_use": "When you want to emphasize a point.",
+            "when_not_to_use": "When you want to be subtle.",
+            "returns": "The text in capitals.",
+            "cost": "free",
+            "examples": ['Shout(text="Hello, world!")'],
+        }
+    )
+    args_model = ShoutArgs
+
+    async def execute(self, args: ShoutArgs) -> str:
+        return args.text.upper()
+
+
 def run(
     loop: AgentLoop, messages: Sequence[Message] = PROMPT, cancel: asyncio.Event | None = None
 ) -> list[AgentEvent]:
@@ -234,8 +257,8 @@ def test_unknown_tool_becomes_an_error_observation() -> None:
     assert finished(events).status == "done"
     [result] = [event.result for event in events if isinstance(event, ToolCallFinished)]
     assert result.is_error
-    assert "no tool named 'Deploy'" in result.content
-    assert "echo" in result.content
+    assert result.content.startswith("Error (unknown_tool): there is no tool named 'Deploy'")
+    assert "Hint: Call one of the available tools: echo." in result.content
 
 
 def test_tool_exception_becomes_an_error_observation() -> None:
@@ -245,7 +268,9 @@ def test_tool_exception_becomes_an_error_observation() -> None:
     assert finished(events).status == "done"
     [result] = [event.result for event in events if isinstance(event, ToolCallFinished)]
     assert result.is_error
+    assert result.content.startswith("Error (internal_error): ")
     assert "ValueError: disk on fire" in result.content
+    assert "\nHint: " in result.content
 
 
 def test_step_limit_stops_the_run() -> None:
@@ -592,3 +617,29 @@ def test_cancel_during_the_last_tool_of_a_turn_stops_before_the_next_model_call(
     assert result.steps == 1
     assert len(model.requests) == 1
     assert result.messages[-1] == ToolResultMessage(tool_call_id="a", content="finished")
+
+
+def test_a_base_tool_runs_inside_the_loop() -> None:
+    model = FakeModel(
+        reply("", call("a", name="shout", arguments='{"text": "hello"}')),
+        reply("Done."),
+    )
+    events = run(AgentLoop(model, [ShoutTool()]))
+
+    assert finished(events).status == "done"
+    assert model.requests[1][-1] == ToolResultMessage(tool_call_id="a", content="HELLO")
+
+
+def test_invalid_arguments_reach_the_model_as_an_observation() -> None:
+    model = FakeModel(
+        reply("", call("a", name="shout", arguments='{"text": 123}')),
+        reply("Done."),
+    )
+    events = run(AgentLoop(model, [ShoutTool()]))
+
+    assert finished(events).status == "done"
+    assert model.requests[1][-1].content.startswith("Error (invalid_arguments): ")
+    assert "text" in model.requests[1][-1].content
+
+    [result] = [event.result for event in events if isinstance(event, ToolCallFinished)]
+    assert result.is_error
