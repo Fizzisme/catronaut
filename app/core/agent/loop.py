@@ -22,31 +22,9 @@ from app.core.llm import (
     Usage,
     UserMessage,
 )
+from app.core.tools import Tool, ToolResult, format_error
 
 RunStatus = Literal["done", "needs_input", "stopped_at_limit", "failed", "cancelled"]
-
-
-@dataclass(frozen=True)
-class ToolResult:
-    # What the model reads as the observation of its call
-    content: str
-    is_error: bool = False
-
-
-class Tool(Protocol):
-    """What the loop needs from a tool; the tool framework (M1.3) implements it."""
-
-    @property
-    def name(self) -> str: ...
-
-    @property
-    def spec(self) -> dict[str, Any]:
-        """The OpenAI function definition sent to the model."""
-        ...
-
-    async def run(self, arguments: str) -> ToolResult:
-        """Run with the raw JSON arguments the model produced."""
-        ...
 
 
 class ModelClient(Protocol):
@@ -295,16 +273,22 @@ class AgentLoop:
         tool = self._tools.get(call.name)
         if tool is None:
             available = ", ".join(sorted(self._tools)) or "none"
-            return ToolResult(
-                f"Error: there is no tool named '{call.name}'. Available tools: {available}.",
-                is_error=True,
+            content = format_error(
+                "unknown_tool",
+                f"there is no tool named '{call.name}'.",
+                f"Call one of the available tools: {available}.",
             )
+            return ToolResult(content, is_error=True)
         try:
             return await tool.run(call.arguments)
         except Exception as exc:
-            return ToolResult(
-                f"Error: tool '{call.name}' failed: {type(exc).__name__}: {exc}", is_error=True
+            # Expected failures come back as `ToolError` observations; this is a bug in the tool
+            content = format_error(
+                "internal_error",
+                f"tool '{call.name}' failed: {type(exc).__name__}: {exc}",
+                "This is not caused by your arguments. Try a different approach.",
             )
+            return ToolResult(content, is_error=True)
 
 
 def _fingerprint(call: ToolCall, result: ToolResult) -> str:
