@@ -4,9 +4,11 @@
   2026-09-27
 - **Audience:** the `project-service` team. `ai-service` implements its side in M1.4
   (`ProjectServiceWorkspace`); the frontend reads files through the same endpoints.
-- **Status:** **agreed**, not implemented yet. The Phase 1 Catalog Management API manages project
-  metadata only; none of the endpoints below exist yet. The design follows that API's conventions so it can live
-  in the same service as a `files` module.
+- **Status:** **implemented** in `project-service` (commit `5396dd9`, checked 2026-10-08). The
+  design follows the Catalog API's conventions and lives in the same service as a `files` module.
+  Where this document and the code differ, [As built](#as-built-2026-10-08) says what the code does;
+  the integration guide is [`ref/ai-service-integration.md`](../ref/ai-service-integration.md).
+  `ai-service` implements its side as `ProjectServiceWorkspace` (M1.4).
 
 ## Why
 
@@ -349,3 +351,33 @@ undo a run   POST files/revert   toRevision: R0
    `PUBLISHED` Projects start with `publishedRevision = null`, which means no files are shown
    publicly until the owner publishes again. The migration does not backfill it with the current
    `filesRevision`, because that would publish content without any action by the owner.
+
+## As built (2026-10-08)
+
+What `project-service` actually does, from `ref/ai-service-integration.md`. Only the differences
+and additions to the sections above are listed; the rest matches.
+
+- **Header.** `X-User-ID` (header names are case-insensitive, so `X-User-Id` works too), sent on
+  the direct internal call. Paths have no `/api/projects` prefix. Every endpoint except `GET
+  /files` on a public published project requires the owner (`403` otherwise).
+- **Lease.** `holder` 1..100 characters, `runId` 1..200, `ttlSeconds` 30..3600 (default 120).
+  `leaseId` is returned only by acquire and renew. Acquiring while any lease exists, the same run's
+  included, is `423 PROJECT_LEASED`: renew instead. `baseRevision` is still fixed by the run's
+  first acquire.
+- **`If-Match`.** A quoted number (`"12"`); missing or unquoted is `400 VALIDATION_FAILED`. Take it
+  from the `ETag` of `GET /files`, never from `baseRevision`, which stays at the run's start.
+- **Checks on a write run in this order:** owner and state, revision (`412`), lease (`423`), then
+  the payload. A stale `If-Match` is reported even when the lease is also wrong.
+- **Paths** also forbid `:` and NUL, and a path cannot be both a file and a directory (`app` vs
+  `app/page.tsx`). Content is UTF-8 without NUL. A path appears at most once per batch.
+- **`503 FILES_STORAGE_UNAVAILABLE`.** Object storage failed and nothing was committed; retry with
+  the same `If-Match`.
+- **The lease is enforced only while it exists.** After it expires, a write with the right
+  `If-Match` is accepted and the old `Lease-Id` ignored, so `ai-service` stops writing itself as
+  soon as a renewal returns `404`.
+- **Revert** has no `source`; it is always recorded as `USER`.
+- **The run's end revision** is stored (`project_file_run_checkpoints`) but not exposed over HTTP
+  yet; `ai-service` tracks the revisions its own saves return.
+- **Decision kept (ADR-0003 Decision 8).** The integration guide suggests re-reading the tree after
+  a `412`. Under our lease a `412` means someone else wrote, so `ai-service` ends the run as
+  `failed` and does not retry.
